@@ -16,6 +16,7 @@ from lmeditor.core.types import (
     OutlineNodeType,
     PerspectiveRole,
     SectionStatus,
+    SourceKind,
     WorkflowStep,
 )
 
@@ -167,6 +168,52 @@ class BibliographicRecord(BaseModel):
                 "resolver must be set; use BibliographyResolverKind.NONE for unresolved records"
             )
         return self
+
+
+class Source(BaseModel):
+    """A user-supplied artifact (file or URL) plus its resolved bibliographic record."""
+
+    model_config = ConfigDict(
+        frozen=True,
+        extra="forbid",
+        str_strip_whitespace=True,
+    )
+
+    id: str = Field(
+        min_length=1,
+        pattern=r"^[a-zA-Z0-9_\-\.]+$",
+        description="Engineer-assigned or server-generated stable identifier",
+    )
+    kind: "SourceKind" = Field(description="On-disk or on-wire kind of the artifact")
+    origin: str = Field(min_length=1, description="Absolute path, URL, or paste content")
+    title: str = Field(min_length=1, description="Display title for the source library")
+    bibliography: Optional[BibliographicRecord] = Field(
+        default=None,
+        description="Resolved bibliographic metadata, if available",
+    )
+    page_count: Optional[int] = Field(
+        default=None,
+        ge=0,
+        description="Number of pages (PDF/DOCX only; None for text/URL)",
+    )
+    byte_size: Optional[int] = Field(
+        default=None,
+        ge=0,
+        description="Size of the artifact in bytes",
+    )
+    added_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc),
+        description="UTC timestamp at which the source was added",
+    )
+
+
+class SourceIngestResult(BaseModel):
+    """Return shape from POST /api/v1/sources/ingest."""
+
+    model_config = ConfigDict(frozen=False, extra="forbid")
+
+    source: Source
+    chunks: list[SourceChunk]
 
 
 class Claim(BaseModel):

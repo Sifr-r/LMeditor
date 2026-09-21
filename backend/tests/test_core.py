@@ -631,3 +631,74 @@ def test_bibliographic_record_immutability_and_extra_forbid() -> None:
             bogus_field="nope",
         )
 
+
+# ============================================================================
+# 8. Source and SourceIngestResult Schema Tests (Task 4)
+# ============================================================================
+
+
+def test_source_minimal() -> None:
+    """Source with required fields defaults bibliography and page_count to None."""
+    from lmeditor.core.schemas import Source
+
+    src = Source(
+        id="src_01",
+        kind=SourceKind.PDF,
+        origin="/tmp/paper.pdf",
+        title="paper.pdf",
+    )
+    assert src.id == "src_01"
+    assert src.kind == SourceKind.PDF
+    assert src.bibliography is None
+    assert src.page_count is None
+
+
+def test_source_with_bibliography() -> None:
+    """Source attaches an optional BibliographicRecord and page_count."""
+    from lmeditor.core.schemas import BibliographicRecord, Source
+
+    bib = BibliographicRecord(
+        title="A Foundational Paper",
+        resolver=BibliographyResolverKind.NONE,
+    )
+    src = Source(
+        id="src_02",
+        kind=SourceKind.PDF,
+        origin="/tmp/paper.pdf",
+        title="paper.pdf",
+        bibliography=bib,
+        page_count=12,
+    )
+    assert src.bibliography.title == "A Foundational Paper"
+    assert src.page_count == 12
+
+
+def test_source_id_pattern() -> None:
+    """Source.id rejects whitespace and empty strings via the pattern + min_length guard."""
+    from lmeditor.core.schemas import Source
+
+    with pytest.raises(ValueError):
+        Source(id="bad id with spaces", kind=SourceKind.TEXT, origin="x", title="x")
+    with pytest.raises(ValueError):
+        Source(id="", kind=SourceKind.TEXT, origin="x", title="x")
+
+
+def test_source_ingest_result_chunks_have_parent_source_id() -> None:
+    """SourceIngestResult bundles a Source with chunks whose document_id matches the source id."""
+    from lmeditor.core.schemas import BibliographicRecord, Source, SourceIngestResult
+
+    bib = BibliographicRecord(title="x", resolver=BibliographyResolverKind.NONE)
+    src = Source(id="src_03", kind=SourceKind.TEXT, origin="x", title="x", bibliography=bib)
+    chunks = [
+        SourceChunk.create(
+            document_id="src_03",
+            text="hello world",
+            char_start=0,
+            char_end=11,
+            byte_start=0,
+            byte_end=11,
+        )
+    ]
+    result = SourceIngestResult(source=src, chunks=chunks)
+    assert all(c.document_id == src.id for c in result.chunks)
+
