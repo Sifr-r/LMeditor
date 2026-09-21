@@ -553,3 +553,81 @@ def test_bibliography_resolution_error_carries_resolver_and_origin() -> None:
     assert err.origin == "10.1234/missing"
     assert "HTTP 404" in str(err)
 
+
+# ============================================================================
+# 7. BibliographicRecord Schema Tests (Task 3)
+# ============================================================================
+
+
+def test_bibliographic_record_minimal() -> None:
+    """BibliographicRecord with only a title defaults to empty authors, no year, and resolver=NONE."""
+    from lmeditor.core.schemas import BibliographicRecord
+
+    rec = BibliographicRecord(title="A Foundational Paper")
+    assert rec.title == "A Foundational Paper"
+    assert rec.authors == []
+    assert rec.year is None
+    assert rec.resolver.value == "none"
+
+
+def test_bibliographic_record_full() -> None:
+    """BibliographicRecord populates all metadata fields and resolver='crossref'."""
+    from lmeditor.core.schemas import BibliographicRecord
+
+    rec = BibliographicRecord(
+        title="A Foundational Paper",
+        authors=["Doe, J.", "Roe, R."],
+        year=2024,
+        publication_date="2024-06-01",
+        container_title="Journal of Tests",
+        volume="12",
+        issue="3",
+        pages="100-120",
+        doi="10.1234/journal.2024.001",
+        url="https://example.org/paper",
+        type="journal-article",
+        resolver="crossref",
+    )
+    assert rec.title == "A Foundational Paper"
+    assert rec.authors == ["Doe, J.", "Roe, R."]
+    assert rec.year == 2024
+    assert rec.publication_date == "2024-06-01"
+    assert rec.container_title == "Journal of Tests"
+    assert rec.volume == "12"
+    assert rec.issue == "3"
+    assert rec.pages == "100-120"
+    assert rec.doi == "10.1234/journal.2024.001"
+    assert rec.url == "https://example.org/paper"
+    assert rec.type == "journal-article"
+    assert rec.resolver.value == "crossref"
+
+
+def test_bibliographic_record_year_bounds() -> None:
+    """Year field rejects values outside [1700, 2100] with a year-related error."""
+    from lmeditor.core.schemas import BibliographicRecord
+
+    with pytest.raises(ValidationError, match="year"):
+        BibliographicRecord(title="Bad Year", year=1000)
+    with pytest.raises(ValidationError, match="year"):
+        BibliographicRecord(title="Future Year", year=9999)
+    # Boundary values are accepted
+    edge_low = BibliographicRecord(title="Old", year=1700)
+    edge_high = BibliographicRecord(title="New", year=2100)
+    assert edge_low.year == 1700
+    assert edge_high.year == 2100
+
+
+def test_bibliographic_record_immutability_and_extra_forbid() -> None:
+    """BibliographicRecord is frozen and rejects unknown fields."""
+    from lmeditor.core.schemas import BibliographicRecord
+
+    rec = BibliographicRecord(title="Locked", resolver=BibliographyResolverKind.USER)
+    with pytest.raises(ValidationError):
+        rec.title = "Mutated"  # type: ignore[misc]
+    with pytest.raises(ValidationError):
+        BibliographicRecord(  # type: ignore[call-arg]
+            title="Locked",
+            resolver=BibliographyResolverKind.USER,
+            bogus_field="nope",
+        )
+

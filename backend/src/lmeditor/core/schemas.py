@@ -9,6 +9,7 @@ from typing import Any, Optional
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from lmeditor.core.types import (
+    BibliographyResolverKind,
     DocumentStatus,
     EntailmentStatus,
     EventType,
@@ -107,6 +108,65 @@ class SourceChunk(BaseModel):
             metadata=metadata if metadata is not None else {},
         )
 
+
+
+class BibliographicRecord(BaseModel):
+    """Structured bibliographic metadata attached to a Source.
+
+    Populated by the bibliography resolver chain in
+    `lmeditor.ingestion.resolvers`. Required field is title; everything
+    else is optional and populated opportunistically by resolvers.
+    `resolver` defaults to `BibliographyResolverKind.NONE` for unresolved
+    records; concrete resolvers (Crossref, arXiv, etc.) overwrite it on
+    success.
+    """
+
+    model_config = ConfigDict(
+        frozen=True,
+        extra="forbid",
+        str_strip_whitespace=True,
+    )
+
+    title: str = Field(min_length=1, description="Title of the work")
+    authors: list[str] = Field(
+        default_factory=list,
+        description="Author names in display order",
+    )
+    year: Optional[int] = Field(
+        default=None,
+        ge=1700,
+        le=2100,
+        description="Four-digit publication year",
+    )
+    publication_date: Optional[str] = Field(
+        default=None,
+        description="Free-form publication date (ISO 8601 preferred)",
+    )
+    container_title: Optional[str] = Field(
+        default=None,
+        description="Journal name, book title, or publisher",
+    )
+    volume: Optional[str] = Field(default=None, description="Journal or book volume")
+    issue: Optional[str] = Field(default=None, description="Journal issue number")
+    pages: Optional[str] = Field(default=None, description="Page range, e.g. '100-120'")
+    doi: Optional[str] = Field(default=None, description="Digital Object Identifier")
+    url: Optional[str] = Field(default=None, description="Canonical URL")
+    type: Optional[str] = Field(
+        default=None,
+        description="CSL type: journal-article, book, book-chapter, etc.",
+    )
+    resolver: "BibliographyResolverKind" = Field(
+        default=BibliographyResolverKind.NONE,
+        description="Which resolver produced this record (defaults to NONE)",
+    )
+
+    @model_validator(mode="after")
+    def validate_resolver_set(self) -> "BibliographicRecord":
+        if self.resolver is None:
+            raise ValueError(
+                "resolver must be set; use BibliographyResolverKind.NONE for unresolved records"
+            )
+        return self
 
 
 class Claim(BaseModel):
