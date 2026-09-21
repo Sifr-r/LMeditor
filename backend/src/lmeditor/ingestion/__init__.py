@@ -20,6 +20,7 @@ from lmeditor.ingestion.resolvers import (
     PubMedBibliographyResolver,
     UserBibliographyResolver,
 )
+from lmeditor.ingestion.service import IngestionService
 
 __all__ = [
     "ArxivBibliographyResolver",
@@ -28,6 +29,7 @@ __all__ = [
     "CrossRefBibliographyResolver",
     "DocxSourceLoader",
     "HtmlSourceLoader",
+    "IngestionService",
     "MarkdownSourceLoader",
     "OpenAlexBibliographyResolver",
     "PdfHeaderBibliographyResolver",
