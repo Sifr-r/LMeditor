@@ -3,13 +3,14 @@
 import asyncio
 import json
 import uuid
+from pathlib import Path
 from typing import Any, AsyncGenerator
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from lmeditor.core.schemas import HITLReviewPayload, SourceChunk, WorkflowEvent
-from lmeditor.core.types import EventType, WorkflowStep
+from lmeditor.core.types import EventType, SourceKind, WorkflowStep
 from lmeditor.server.session import session_manager, WorkflowSession
 
 router = APIRouter(prefix="/api/v1", tags=["Workflow & Streaming"])
@@ -31,6 +32,25 @@ class GenerateDocumentResponse(BaseModel):
     doc_id: str
     status: str
     stream_url: str
+
+
+class SourceIngestRequest(BaseModel):
+    """JSON fallback when the caller does not upload a file."""
+
+    source_id: str = Field(..., min_length=1)
+    kind: str = Field(..., description="One of SourceKind values")
+    origin: str = Field(..., min_length=1, description="URL or absolute path")
+    title: str = Field(..., min_length=1)
+    doi: str | None = None
+    arxiv_id: str | None = None
+    pmid: str | None = None
+
+
+class SourceIngestResponse(BaseModel):
+    """Response payload from the source ingestion endpoint."""
+
+    source: dict[str, Any]
+    chunks: list[dict[str, Any]]
 
 
 class WorkflowStatusResponse(BaseModel):
@@ -98,6 +118,74 @@ async def generate_document(request: GenerateDocumentRequest) -> GenerateDocumen
         status="started",
         stream_url=f"/api/v1/stream/{doc_id}",
     )
+
+
+@router.post(
+    "/sources/ingest",
+    response_model=SourceIngestResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Ingest a source artifact (file upload or URL)",
+)
+async def ingest_source(
+    source_id: str = Form(...),
+    title: str = Form(...),
+    kind: str | None = Form(default=None),
+    origin: str | None = Form(default=None),
+    doi: str | None = Form(default=None),
+    arxiv_id: str | None = Form(default=None),
+    pmid: str | None = Form(default=None),
+    file: UploadFile | None = File(default=None),
+) -> SourceIngestResponse:
+    """Ingest a single source. Either upload a file or supply ``kind`` + ``origin``."""
+    from lmeditor.ingestion.service import IngestionService
+    from lmeditor.server.routes_helpers import persist_source_to_disk
+
+    if file is None and (kind is None or origin is None):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Provide either `file` upload or `kind` + `origin`.",
+        )
+
+    if file is not None:
+        saved_path = await persist_source_to_disk(file, source_id=source_id)
+        ext_kind = _kind_from_extension(saved_path.path)
+        kind = ext_kind.value
+        origin = str(saved_path.path)
+        title = title or saved_path.path.name
+
+    # Control-flow invariant: if `file` is None the earlier guard rejects the
+    # request, so both `kind` and `origin` must be populated. Narrow for mypy.
+    assert kind is not None and origin is not None
+
+    svc = IngestionService.default()
+    result = svc.ingest(
+        source_id=source_id,
+        kind=SourceKind(kind),
+        origin=origin,
+        title=title,
+        doi=doi,
+        arxiv_id=arxiv_id,
+        pmid=pmid,
+    )
+
+    return SourceIngestResponse(
+        source=result.source.model_dump(mode="json"),
+        chunks=[c.model_dump(mode="json") for c in result.chunks],
+    )
+
+
+def _kind_from_extension(path: Path) -> SourceKind:
+    """Map a file extension to the corresponding ``SourceKind``."""
+    suffix = path.suffix.lower()
+    if suffix == ".pdf":
+        return SourceKind.PDF
+    if suffix in {".docx", ".doc"}:
+        return SourceKind.DOCX
+    if suffix in {".md", ".markdown"}:
+        return SourceKind.MARKDOWN
+    if suffix in {".html", ".htm"}:
+        return SourceKind.HTML
+    return SourceKind.TEXT
 
 
 @router.get(

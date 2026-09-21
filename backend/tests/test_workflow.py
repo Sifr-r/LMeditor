@@ -189,3 +189,49 @@ def test_initial_state_accepts_supplied_sources() -> None:
     )
     assert len(state["sources"]) == 1
     assert state["sources"][0].id == "src_seed"
+
+
+# ---------------------------------------------------------------------------
+# Task 14: POST /api/v1/sources/ingest route
+# ---------------------------------------------------------------------------
+
+
+def test_ingest_endpoint_accepts_text_file() -> None:
+    """The ingest endpoint accepts a multipart text upload and returns 202 + chunks."""
+    import asyncio
+    import tempfile
+    from pathlib import Path
+
+    import httpx
+
+    from lmeditor.server.app import create_app
+
+    app = create_app()
+    transport = httpx.ASGITransport(app=app)
+
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".txt", delete=False, encoding="utf-8"
+    ) as f:
+        f.write("hello from the API\n")
+        path = Path(f.name)
+
+    files = {"file": ("note.txt", path.read_bytes(), "text/plain")}
+    data = {"source_id": "src_api", "title": "note.txt"}
+
+    async def run() -> None:
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post(
+                "/api/v1/sources/ingest",
+                files=files,
+                data=data,
+            )
+        assert response.status_code == 202
+        body = response.json()
+        assert body["source"]["id"] == "src_api"
+        assert body["source"]["kind"] == "text"
+        assert isinstance(body["chunks"], list)
+        assert len(body["chunks"]) >= 1
+
+    asyncio.run(run())
+
+    path.unlink()
