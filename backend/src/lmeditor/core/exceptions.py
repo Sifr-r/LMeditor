@@ -242,3 +242,23 @@ class PassageBoundsError(DSPyAssertionError):
             merged_details["section_id"] = section_id
         super().__init__(message, details=merged_details, section_id=section_id, **kwargs)
         self.section_id = section_id
+
+
+class SourceLoadError(LMeditorError):
+    """Raised when a source artifact cannot be loaded by its loader."""
+
+    def __init__(self, kind: str, origin: str, reason: str) -> None:
+        self.kind = kind
+        self.origin = origin
+        self.reason = reason
+        super().__init__(f"Failed to load {kind} source '{origin}': {reason}")
+
+
+class BibliographyResolutionError(LMeditorError):
+    """Raised when a bibliography resolver fails to resolve an origin."""
+
+    def __init__(self, resolver: str, origin: str, reason: str) -> None:
+        self.resolver = resolver
+        self.origin = origin
+        self.reason = reason
+        super().__init__(f"Resolver '{resolver}' failed for '{origin}': {reason}")

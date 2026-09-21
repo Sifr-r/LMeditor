@@ -11,10 +11,12 @@ from pydantic import ValidationError
 
 import lmeditor.core as core
 from lmeditor.core.exceptions import (
+    BibliographyResolutionError,
     ChunkNotFoundError,
     CitationHallucinationError,
     LMeditorError,
     ProvenanceError,
+    SourceLoadError,
     SpanAlignmentError,
     UngroundedClaimError,
     WorkflowDeadlockError,
@@ -523,4 +525,31 @@ def test_bibliography_resolver_kind_ordering() -> None:
     ]
     assert BibliographyResolverKind.USER.value == "user"
     assert BibliographyResolverKind.NONE.value == "none"
+
+
+# ============================================================================
+# 6. Source Ingestion Exception Tests (Task 2 — SourceLoadError & BibliographyResolutionError)
+# ============================================================================
+
+
+def test_source_load_error_carries_kind_and_origin() -> None:
+    """Verify SourceLoadError exposes kind/origin/reason and is raisable."""
+    err = SourceLoadError(kind="pdf", origin="paper.pdf", reason="not a real PDF")
+    assert err.kind == "pdf"
+    assert err.origin == "paper.pdf"
+    assert "not a real PDF" in str(err)
+    with pytest.raises(SourceLoadError):
+        raise err
+
+
+def test_bibliography_resolution_error_carries_resolver_and_origin() -> None:
+    """Verify BibliographyResolutionError exposes resolver/origin/reason."""
+    err = BibliographyResolutionError(
+        resolver="crossref",
+        origin="10.1234/missing",
+        reason="HTTP 404",
+    )
+    assert err.resolver == "crossref"
+    assert err.origin == "10.1234/missing"
+    assert "HTTP 404" in str(err)
 
