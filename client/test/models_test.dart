@@ -7,6 +7,7 @@ import 'package:client/core/models/claim.dart';
 import 'package:client/core/models/outline.dart';
 import 'package:client/core/models/perspective.dart';
 import 'package:client/core/theme.dart';
+import 'package:client/models/source.dart';
 
 void main() {
   group('SourceChunk Model & Validation', () {
@@ -821,6 +822,46 @@ void main() {
       expect(cardTheme.color, AppColors.card);
       expect(cardTheme.elevation, 0);
       expect(cardTheme.shape, isA<RoundedRectangleBorder>());
+    });
+  });
+
+  group('Source & BibliographicRecord Models', () {
+    test('Source round-trips through JSON', () {
+      final json = {
+        'id': 'src_1',
+        'kind': 'pdf',
+        'origin': '/tmp/x.pdf',
+        'title': 'x.pdf',
+        'page_count': 12,
+      };
+      final src = Source.fromJson(json);
+      expect(src.id, 'src_1');
+      expect(src.kind, SourceKind.pdf);
+      expect(src.title, 'x.pdf');
+      expect(src.pageCount, 12);
+      expect(src.bibliography, isNull);
+    });
+
+    test('Source with bibliography round-trips', () {
+      final json = {
+        'id': 'src_2',
+        'kind': 'pdf',
+        'origin': '/tmp/y.pdf',
+        'title': 'y.pdf',
+        'bibliography': {
+          'title': 'A Foundational Paper',
+          'authors': ['Doe, J.'],
+          'year': 2024,
+          'doi': '10.1234/abc',
+          'resolver': 'crossref',
+        },
+      };
+      final src = Source.fromJson(json);
+      expect(src.bibliography, isNotNull);
+      expect(src.bibliography!.title, 'A Foundational Paper');
+      expect(src.bibliography!.authors, ['Doe, J.']);
+      expect(src.bibliography!.year, 2024);
+      expect(src.bibliography!.doi, '10.1234/abc');
     });
   });
 }
