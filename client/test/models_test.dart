@@ -1,6 +1,12 @@
+import 'dart:convert';
+import 'dart:typed_data';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 
+import 'package:client/core/api_client.dart';
 import 'package:client/core/models/chunk.dart';
 import 'package:client/core/models/citation.dart';
 import 'package:client/core/models/claim.dart';
@@ -862,6 +868,136 @@ void main() {
       expect(src.bibliography!.authors, ['Doe, J.']);
       expect(src.bibliography!.year, 2024);
       expect(src.bibliography!.doi, '10.1234/abc');
+    });
+  });
+
+  group('ApiClient.uploadSource', () {
+    test('posts multipart and returns SourceUploadResult', () async {
+      // Use MockClient.streaming so the handler receives the original
+      // MultipartRequest (the non-streaming MockClient rebuilds it into a
+      // generic Request, losing the form fields and files).
+      final mock = MockClient.streaming((baseRequest, bodyStream) async {
+        expect(baseRequest.method, 'POST');
+        expect(baseRequest.url.path, '/api/v1/sources/ingest');
+
+        expect(baseRequest, isA<http.MultipartRequest>());
+        final multipart = baseRequest as http.MultipartRequest;
+        expect(multipart.fields['source_id'], 'src_1');
+        expect(multipart.fields['title'], 'x.txt');
+        expect(multipart.files.length, 1);
+        expect(multipart.files.first.field, 'file');
+        expect(multipart.files.first.filename, 'x.txt');
+
+        // Drain the body to keep the stream alive.
+        await bodyStream.toBytes();
+
+        return http.StreamedResponse(
+          Stream<List<int>>.fromIterable([
+            utf8.encode(jsonEncode({
+              'source': {
+                'id': 'src_1',
+                'kind': 'text',
+                'origin': '/tmp/x.txt',
+                'title': 'x.txt',
+              },
+              'chunks': <dynamic>[],
+            })),
+          ]),
+          202,
+          headers: {'content-type': 'application/json'},
+        );
+      });
+
+      final client = LMeditorApiClient(
+        baseUrl: 'http://localhost:8000',
+        httpClient: mock,
+      );
+
+      final bytes = Uint8List.fromList(utf8.encode('hello'));
+      final result = await client.uploadSource(
+        sourceId: 'src_1',
+        title: 'x.txt',
+        filename: 'x.txt',
+        bytes: bytes,
+        contentType: 'text/plain',
+      );
+
+      expect(result.source.id, 'src_1');
+      expect(result.source.kind, SourceKind.text);
+      expect(result.source.title, 'x.txt');
+      expect(result.chunks, isEmpty);
+    });
+
+    test('passes optional doi/arxiv_id/pmid form fields', () async {
+      http.MultipartRequest? captured;
+      final mock = MockClient.streaming((baseRequest, bodyStream) async {
+        captured = baseRequest as http.MultipartRequest;
+        await bodyStream.toBytes();
+        return http.StreamedResponse(
+          Stream<List<int>>.fromIterable([
+            utf8.encode(jsonEncode({
+              'source': {
+                'id': 'src_2',
+                'kind': 'pdf',
+                'origin': '/tmp/y.pdf',
+                'title': 'y.pdf',
+              },
+              'chunks': <dynamic>[],
+            })),
+          ]),
+          202,
+          headers: {'content-type': 'application/json'},
+        );
+      });
+
+      final client = LMeditorApiClient(
+        baseUrl: 'http://localhost:8000',
+        httpClient: mock,
+      );
+
+      await client.uploadSource(
+        sourceId: 'src_2',
+        title: 'y.pdf',
+        filename: 'y.pdf',
+        bytes: Uint8List.fromList(utf8.encode('pdf-bytes')),
+        doi: '10.1234/abc',
+        arxivId: '2106.12345',
+        pmid: 'PMID-9999',
+      );
+
+      expect(captured, isNotNull);
+      expect(captured!.fields['doi'], '10.1234/abc');
+      expect(captured!.fields['arxiv_id'], '2106.12345');
+      expect(captured!.fields['pmid'], 'PMID-9999');
+    });
+
+    test('throws LMeditorApiException on non-2xx response', () async {
+      final mock = MockClient.streaming((baseRequest, bodyStream) async {
+        await bodyStream.toBytes();
+        return http.StreamedResponse(
+          Stream<List<int>>.fromIterable([
+            utf8.encode(jsonEncode({'detail': 'bad source'})),
+          ]),
+          400,
+          headers: {'content-type': 'application/json'},
+        );
+      });
+
+      final client = LMeditorApiClient(
+        baseUrl: 'http://localhost:8000',
+        httpClient: mock,
+      );
+
+      await expectLater(
+        client.uploadSource(
+          sourceId: 'src_x',
+          title: 'x',
+          filename: 'x',
+          bytes: Uint8List.fromList(utf8.encode('x')),
+        ),
+        throwsA(isA<LMeditorApiException>()
+            .having((e) => e.statusCode, 'statusCode', 400)),
+      );
     });
   });
 }

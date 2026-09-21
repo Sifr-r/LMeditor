@@ -2,8 +2,11 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/foundation.dart';
+// ignore: unnecessary_import  -- canonical import for Uint8List (also re-exported by flutter/foundation.dart)
+import 'dart:typed_data';
 import 'package:http/http.dart' as http;
 
+import '../models/source.dart';
 import 'models/chunk.dart';
 import 'models/citation.dart';
 import 'models/claim.dart';
@@ -599,6 +602,39 @@ Stream<LMeditorStreamEvent> parseSseLines(Stream<String> lineStream) async* {
 // 4. LMeditorApiClient
 // ============================================================================
 
+/// Result of `POST /api/v1/sources/ingest`.
+///
+/// Mirrors the backend's `SourceIngestResponse` Pydantic schema
+/// (`backend/src/lmeditor/core/schemas.py`): the persisted [Source] plus the
+/// list of [SourceChunk]s produced by ingestion. Chunks are returned as raw
+/// `Map<String, dynamic>` to avoid a hard dependency on the chunk model from
+/// this client surface; callers that need strongly-typed chunks can pass the
+/// list through `SourceChunk.fromJson` (Task 15 already added those models).
+class SourceUploadResult {
+  final Source source;
+  final List<Map<String, dynamic>> chunks;
+
+  const SourceUploadResult({
+    required this.source,
+    required this.chunks,
+  });
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is SourceUploadResult &&
+          runtimeType == other.runtimeType &&
+          source == other.source &&
+          listEquals(chunks, other.chunks);
+
+  @override
+  int get hashCode => Object.hash(source, Object.hashAll(chunks));
+
+  @override
+  String toString() =>
+      'SourceUploadResult(source: $source, chunks: ${chunks.length})';
+}
+
 /// Primary API and SSE streaming gateway for the LMeditor writing harness.
 class LMeditorApiClient {
   final String baseUrl;
@@ -897,6 +933,111 @@ class LMeditorApiClient {
         'feedback': feedback,
         'approved': approved,
       },
+    );
+  }
+
+  /// Uploads a single source artifact (file bytes) to the ingestion pipeline.
+  /// POST `/api/v1/sources/ingest` (multipart/form-data)
+  ///
+  /// The file is sent under the multipart field name `file`, with
+  /// `source_id`, `title`, and any of `doi` / `arxiv_id` / `pmid` supplied
+  /// as sibling form fields (matching the FastAPI route in
+  /// `backend/src/lmeditor/server/routes.py::ingest_source`).
+  ///
+  /// On success (HTTP 202 Accepted), the persisted [Source] plus the list of
+  /// ingested chunks are returned in a [SourceUploadResult].
+  Future<SourceUploadResult> uploadSource({
+    required String sourceId,
+    required String title,
+    required String filename,
+    required Uint8List bytes,
+    String contentType = 'application/octet-stream',
+    String? doi,
+    String? arxivId,
+    String? pmid,
+  }) async {
+    final uri = Uri.parse('$baseUrl/api/v1/sources/ingest');
+    final request = http.MultipartRequest('POST', uri)
+      ..fields['source_id'] = sourceId
+      ..fields['title'] = title
+      ..files.add(http.MultipartFile.fromBytes(
+        'file',
+        bytes,
+        filename: filename,
+        contentType: http.MediaType.parse(contentType),
+      ));
+
+    if (doi != null) request.fields['doi'] = doi;
+    if (arxivId != null) request.fields['arxiv_id'] = arxivId;
+    if (pmid != null) request.fields['pmid'] = pmid;
+
+    final http.StreamedResponse streamed;
+    try {
+      streamed = await _httpClient.send(request);
+    } on SocketException catch (e) {
+      throw LMeditorConnectionException(
+        message: 'Network connection failed during source upload: ${e.message}',
+        host: uri.host,
+        originalError: e,
+      );
+    } on http.ClientException catch (e) {
+      throw LMeditorConnectionException(
+        message: 'HTTP client error during source upload: ${e.message}',
+        host: uri.host,
+        originalError: e,
+      );
+    } catch (e) {
+      throw LMeditorConnectionException(
+        message: 'Source upload request failed: $e',
+        host: uri.host,
+        originalError: e,
+      );
+    }
+
+    final response = await http.Response.fromStream(streamed);
+
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw LMeditorApiException(
+        statusCode: response.statusCode,
+        message: 'Failed to upload source (HTTP ${response.statusCode}): ${response.body}',
+        endpoint: uri.path,
+        responseBody: response.body,
+      );
+    }
+
+    final Map<String, dynamic> body;
+    try {
+      body = jsonDecode(response.body) as Map<String, dynamic>;
+    } catch (e) {
+      throw LMeditorApiException(
+        statusCode: response.statusCode,
+        message: 'Failed to decode ingest response: ${response.body}',
+        endpoint: uri.path,
+        responseBody: response.body,
+      );
+    }
+
+    final sourceJson = body['source'];
+    if (sourceJson is! Map<String, dynamic>) {
+      throw LMeditorApiException(
+        statusCode: response.statusCode,
+        message: 'Ingest response missing "source" object: ${response.body}',
+        endpoint: uri.path,
+        responseBody: response.body,
+      );
+    }
+
+    final rawChunks = body['chunks'];
+    final chunks = rawChunks is List
+        ? rawChunks
+            .whereType<Map<String, dynamic>>()
+            .map((c) => Map<String, dynamic>.from(c))
+            .toList(growable: false)
+        : const <Map<String, dynamic>>[];
+
+    return SourceUploadResult(
+      source: Source.fromJson(sourceJson),
+      chunks: chunks,
     );
   }
 
