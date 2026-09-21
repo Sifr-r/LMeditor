@@ -9,6 +9,7 @@ from lmeditor.ingestion.loaders import (
     TextSourceLoader,
     UrlSourceLoader,
 )
+from lmeditor.ingestion.registry import SourceLoaderRegistry
 
 __all__ = [
     "DocxSourceLoader",
@@ -16,6 +17,7 @@ __all__ = [
     "MarkdownSourceLoader",
     "PdfSourceLoader",
     "SourceLoader",
+    "SourceLoaderRegistry",
     "TextSourceLoader",
     "UrlSourceLoader",
 ]
