@@ -136,7 +136,11 @@ async def ingest_source(
     pmid: str | None = Form(default=None),
     file: UploadFile | None = File(default=None),
 ) -> SourceIngestResponse:
-    """Ingest a single source. Either upload a file or supply ``kind`` + ``origin``."""
+    """Ingest a single source via file upload (multipart/form-data only).
+
+    For URL ingestion, use ``POST /api/v1/sources/url`` with a JSON body
+    matching ``SourceIngestRequest`` instead of this multipart endpoint.
+    """
     from lmeditor.ingestion.service import IngestionService
     from lmeditor.server.routes_helpers import persist_source_to_disk
 
@@ -166,6 +170,39 @@ async def ingest_source(
         doi=doi,
         arxiv_id=arxiv_id,
         pmid=pmid,
+    )
+
+    return SourceIngestResponse(
+        source=result.source.model_dump(mode="json"),
+        chunks=[c.model_dump(mode="json") for c in result.chunks],
+    )
+
+
+@router.post(
+    "/sources/url",
+    response_model=SourceIngestResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Ingest a URL-referenced source via JSON body",
+)
+async def ingest_url_source(payload: SourceIngestRequest) -> SourceIngestResponse:
+    """Ingest a single source referenced by URL using a JSON body.
+
+    The body must match :class:`SourceIngestRequest`. The endpoint forces
+    ``kind=SourceKind.URL`` and dispatches to the same
+    :class:`IngestionService` flow as the multipart file-upload endpoint,
+    just with a string ``origin`` instead of an uploaded file.
+    """
+    from lmeditor.ingestion.service import IngestionService
+
+    svc = IngestionService.default()
+    result = svc.ingest(
+        source_id=payload.source_id,
+        kind=SourceKind.URL,
+        origin=payload.origin,
+        title=payload.title,
+        doi=payload.doi,
+        arxiv_id=payload.arxiv_id,
+        pmid=payload.pmid,
     )
 
     return SourceIngestResponse(
