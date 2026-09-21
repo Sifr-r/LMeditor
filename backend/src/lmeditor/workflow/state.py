@@ -9,6 +9,7 @@ from lmeditor.core.schemas import (
     OutlineNode,
     Perspective,
     SectionDraft,
+    Source,
     SourceChunk,
     VerificationReport,
 )
@@ -34,6 +35,9 @@ class HarnessState(TypedDict, total=False):
     topic: str
     target_audience: str
     guidelines: list[str]
+
+    # Layer 0: User-supplied Source artifacts (Phase P0.1)
+    sources: list[Source]
 
     # Layer 1: Ingested & Indexed Source Chunks
     raw_texts: list[str]
@@ -69,6 +73,7 @@ def create_initial_harness_state(
     topic: str,
     target_audience: str = "Technical & Academic Readers",
     raw_texts: list[str] | None = None,
+    sources: list[Source] | None = None,
     guidelines: list[str] | None = None,
 ) -> HarnessState:
     """Initialize a clean, deterministic HarnessState."""
@@ -78,6 +83,7 @@ def create_initial_harness_state(
         target_audience=target_audience,
         guidelines=guidelines or [],
         raw_texts=raw_texts or [],
+        sources=list(sources or []),
         source_chunks={},
         perspectives=[],
         outline_root=None,

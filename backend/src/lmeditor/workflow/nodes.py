@@ -26,13 +26,15 @@ logger = logging.getLogger(__name__)
 
 
 def ingest_sources_node(state: HarnessState) -> dict[str, Any]:
-    """Ingest and chunk raw source texts, generating cryptographic chunk IDs."""
+    """Ingest and chunk source artifacts (text or full Source objects)."""
     raw_texts = state.get("raw_texts", [])
+    sources = state.get("sources", [])
     doc_id = state.get("doc_id", "doc_default")
     chunker = SourceChunker(chunk_size=120, overlap_size=25)
 
     chunks_dict: dict[str, SourceChunk] = dict(state.get("source_chunks", {}))
 
+    # Layer 1: chunk raw_texts (legacy behavior preserved)
     for idx, text in enumerate(raw_texts):
         if not text.strip():
             continue
@@ -45,8 +47,27 @@ def ingest_sources_node(state: HarnessState) -> dict[str, Any]:
         for chunk in produced_chunks:
             chunks_dict[chunk.chunk_id] = chunk
 
+    # Layer 2: re-chunk any Source whose chunks weren't already produced
+    from lmeditor.ingestion.service import IngestionService
+
+    svc = IngestionService.default()
+    for source in sources:
+        # Only re-ingest if no chunks for this source already exist
+        already = any(c.document_id == source.id for c in chunks_dict.values())
+        if already:
+            continue
+        result = svc.ingest(
+            source_id=source.id,
+            kind=source.kind,
+            origin=source.origin,
+            title=source.title,
+        )
+        for chunk in result.chunks:
+            chunks_dict[chunk.chunk_id] = chunk
+
     return {
         "source_chunks": chunks_dict,
+        "sources": sources,
         "status": "sources_indexed",
     }
 

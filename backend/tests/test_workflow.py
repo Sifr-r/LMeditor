@@ -4,7 +4,16 @@ from __future__ import annotations
 
 import pytest
 
-from lmeditor.core.schemas import OutlineNode, SectionDraft, SectionStatus, SourceChunk, VerificationReport
+from lmeditor.core.schemas import (
+    BibliographicRecord,
+    OutlineNode,
+    SectionDraft,
+    SectionStatus,
+    Source,
+    SourceChunk,
+    VerificationReport,
+)
+from lmeditor.core.types import BibliographyResolverKind, SourceKind
 from lmeditor.workflow.edges import route_after_hitl, route_after_verification
 from lmeditor.workflow.graph import build_lmeditor_graph
 from lmeditor.workflow.nodes import (
@@ -151,3 +160,32 @@ def test_compile_lmeditor_graph() -> None:
     """Verify that the full LangGraph state graph compiles successfully without cycles/errors."""
     compiled_app = build_lmeditor_graph()
     assert compiled_app is not None
+
+
+# ---------------------------------------------------------------------------
+# Task 13: Source-object support in HarnessState and ingest_sources_node
+# ---------------------------------------------------------------------------
+
+
+def test_initial_state_carries_empty_sources() -> None:
+    """Default initial state exposes an empty ``sources`` list (Layer 0)."""
+    state = create_initial_harness_state(doc_id="d1", topic="t", raw_texts=[])
+    assert state.get("sources", []) == []
+
+
+def test_initial_state_accepts_supplied_sources() -> None:
+    """``create_initial_harness_state`` accepts and round-trips a list of Source."""
+    src = Source(
+        id="src_seed",
+        kind=SourceKind.TEXT,
+        origin="/tmp/x.txt",
+        title="x.txt",
+        bibliography=BibliographicRecord(
+            title="Seed", resolver=BibliographyResolverKind.NONE
+        ),
+    )
+    state = create_initial_harness_state(
+        doc_id="d2", topic="t", raw_texts=[], sources=[src]
+    )
+    assert len(state["sources"]) == 1
+    assert state["sources"][0].id == "src_seed"
