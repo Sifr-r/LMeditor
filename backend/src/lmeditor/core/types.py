@@ -106,6 +106,29 @@ class CitationFormat(str, Enum):
     BRACKETED_NUMBER = "bracketed_number"  # e.g., [1]
 
 
+class SourceKind(str, Enum):
+    """The on-disk or on-wire kind of a source artifact to be ingested."""
+
+    PDF = "pdf"
+    DOCX = "docx"
+    MARKDOWN = "markdown"
+    HTML = "html"
+    TEXT = "text"
+    URL = "url"
+
+
+class BibliographyResolverKind(str, Enum):
+    """Sources of bibliographic metadata, in priority order."""
+
+    PDF_HEADER = "pdf-header"
+    CROSSREF = "crossref"
+    ARXIV = "arxiv"
+    PUBMED = "pubmed"
+    OPENALEX = "openalex"
+    USER = "user"
+    NONE = "none"
+
+
 @runtime_checkable
 class ChunkerProtocol(Protocol):
     """Protocol for text segmentation into traceable source chunks."""
@@ -189,6 +212,8 @@ __all__ = [
     "PerspectiveRole",
     "OutlineNodeType",
     "CitationFormat",
+    "SourceKind",
+    "BibliographyResolverKind",
     "ChunkerProtocol",
     "DenseEmbedderProtocol",
     "SparseSearchProtocol",

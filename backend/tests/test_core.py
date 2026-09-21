@@ -29,12 +29,14 @@ from lmeditor.core.schemas import (
     VerificationReport,
 )
 from lmeditor.core.types import (
+    BibliographyResolverKind,
     ChunkerProtocol,
     DenseEmbedderProtocol,
     DocumentStatus,
     EntailmentStatus,
     HybridIndexerProtocol,
     PerspectiveRole,
+    SourceKind,
     SparseSearchProtocol,
 )
 
@@ -492,4 +494,33 @@ def test_verification_scorecard_and_events() -> None:
     )
     assert event.event_type == EventType.TOKEN_DELTA
     assert event.step == WorkflowStep.DRAFT_SECTIONS
+
+
+# ============================================================================
+# 5. Source Ingestion Enum Tests (Task 1 — SourceKind & BibliographyResolverKind)
+# ============================================================================
+
+
+def test_source_kind_includes_pdf_docx_md_html_text_url() -> None:
+    """Verify SourceKind exposes all six ingestion modalities with stable wire values."""
+    assert SourceKind.PDF.value == "pdf"
+    assert SourceKind.DOCX.value == "docx"
+    assert SourceKind.MARKDOWN.value == "markdown"
+    assert SourceKind.HTML.value == "html"
+    assert SourceKind.TEXT.value == "text"
+    assert SourceKind.URL.value == "url"
+
+
+def test_bibliography_resolver_kind_ordering() -> None:
+    """Verify BibliographyResolverKind declaration order defines resolver priority."""
+    order = [k.value for k in BibliographyResolverKind]
+    assert order[:5] == [
+        "pdf-header",
+        "crossref",
+        "arxiv",
+        "pubmed",
+        "openalex",
+    ]
+    assert BibliographyResolverKind.USER.value == "user"
+    assert BibliographyResolverKind.NONE.value == "none"
 
