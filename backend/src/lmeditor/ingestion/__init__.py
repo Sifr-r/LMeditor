@@ -7,6 +7,7 @@ from lmeditor.ingestion.loaders import (
     PdfSourceLoader,
     SourceLoader,
     TextSourceLoader,
+    UrlSourceLoader,
 )
 
 __all__ = [
@@ -16,4 +17,5 @@ __all__ = [
     "PdfSourceLoader",
     "SourceLoader",
     "TextSourceLoader",
+    "UrlSourceLoader",
 ]

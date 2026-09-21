@@ -5,6 +5,7 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 
+import httpx
 import pytest
 
 from lmeditor.core.exceptions import SourceLoadError
@@ -14,6 +15,7 @@ from lmeditor.ingestion.loaders import (
     MarkdownSourceLoader,
     PdfSourceLoader,
     TextSourceLoader,
+    UrlSourceLoader,
 )
 
 
@@ -164,3 +166,45 @@ def test_docx_loader_reads_text() -> None:
     assert isinstance(text, str) and len(text) > 0
     assert "Hello from a test DOCX." in text
     assert page_count is None
+
+
+# ============================================================================
+# 6. UrlSourceLoader Tests (Task 9)
+# ============================================================================
+
+
+def test_url_loader_fetches_and_extracts_text(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_get(url, **kwargs):
+        captured["url"] = url
+        captured["follow_redirects"] = kwargs.get("follow_redirects")
+        request = httpx.Request("GET", url)
+        return httpx.Response(
+            200,
+            content=b"<html><body><h1>Fetched</h1><p>Body.</p></body></html>",
+            request=request,
+        )
+
+    monkeypatch.setattr(httpx, "get", fake_get)
+
+    loader = UrlSourceLoader()
+    text, page_count = loader.load("https://example.org/paper")
+
+    assert "Fetched" in text
+    assert "Body." in text
+    assert page_count is None
+    assert captured["url"] == "https://example.org/paper"
+    assert captured["follow_redirects"] is True
+
+
+def test_url_loader_raises_on_http_error(monkeypatch) -> None:
+    def fake_get(url, **kwargs):
+        request = httpx.Request("GET", url)
+        return httpx.Response(404, request=request)
+
+    monkeypatch.setattr(httpx, "get", fake_get)
+
+    loader = UrlSourceLoader()
+    with pytest.raises(SourceLoadError, match="Failed to load url source"):
+        loader.load("https://example.org/missing")

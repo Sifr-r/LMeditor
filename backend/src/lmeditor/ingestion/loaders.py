@@ -6,6 +6,8 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Optional
 
+import httpx
+
 from lmeditor.core.exceptions import SourceLoadError
 from lmeditor.core.types import SourceKind
 
@@ -16,8 +18,13 @@ class SourceLoader(ABC):
     kind: SourceKind
 
     @abstractmethod
-    def load(self, path: Path) -> tuple[str, Optional[int]]:
-        """Load text and (optional) page count from a path on disk.
+    def load(self, origin: str | Path) -> tuple[str, Optional[int]]:
+        """Load text and (optional) page count from an origin.
+
+        ``origin`` may be a filesystem ``Path`` (for on-disk sources) or a
+        string (e.g. a URL for the URL kind). File-based loaders normalize
+        the value to a ``Path`` internally; the URL loader uses the string
+        directly.
 
         Returns:
             (text, page_count). page_count is None for kinds that don't paginate.
@@ -30,7 +37,8 @@ class TextSourceLoader(SourceLoader):
 
     kind = SourceKind.TEXT
 
-    def load(self, path: Path) -> tuple[str, Optional[int]]:
+    def load(self, origin: str | Path) -> tuple[str, Optional[int]]:
+        path = Path(origin)
         if not path.exists():
             raise SourceLoadError(
                 kind=self.kind.value,
@@ -58,7 +66,8 @@ class MarkdownSourceLoader(SourceLoader):
 
     kind = SourceKind.MARKDOWN
 
-    def load(self, path: Path) -> tuple[str, Optional[int]]:
+    def load(self, origin: str | Path) -> tuple[str, Optional[int]]:
+        path = Path(origin)
         if not path.exists():
             raise SourceLoadError(
                 kind=self.kind.value,
@@ -92,7 +101,8 @@ class HtmlSourceLoader(SourceLoader):
 
     kind = SourceKind.HTML
 
-    def load(self, path: Path) -> tuple[str, Optional[int]]:
+    def load(self, origin: str | Path) -> tuple[str, Optional[int]]:
+        path = Path(origin)
         if not path.exists():
             raise SourceLoadError(
                 kind=self.kind.value,
@@ -133,7 +143,8 @@ class PdfSourceLoader(SourceLoader):
 
     kind = SourceKind.PDF
 
-    def load(self, path: Path) -> tuple[str, Optional[int]]:
+    def load(self, origin: str | Path) -> tuple[str, Optional[int]]:
+        path = Path(origin)
         if not path.exists():
             raise SourceLoadError(
                 kind=self.kind.value,
@@ -175,7 +186,8 @@ class DocxSourceLoader(SourceLoader):
 
     kind = SourceKind.DOCX
 
-    def load(self, path: Path) -> tuple[str, Optional[int]]:
+    def load(self, origin: str | Path) -> tuple[str, Optional[int]]:
+        path = Path(origin)
         if not path.exists():
             raise SourceLoadError(
                 kind=self.kind.value,
@@ -200,4 +212,36 @@ class DocxSourceLoader(SourceLoader):
                 origin=str(path),
                 reason=f"python-docx failed: {exc}",
             ) from exc
+        return text, None
+
+
+class UrlSourceLoader(SourceLoader):
+    """Downloads a URL with httpx, then routes through trafilatura extraction."""
+
+    kind = SourceKind.URL
+    timeout_seconds: float = 30.0
+
+    def load(self, origin: str) -> tuple[str, Optional[int]]:  # type: ignore[override]
+        try:
+            response = httpx.get(origin, follow_redirects=True, timeout=self.timeout_seconds)
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise SourceLoadError(
+                kind=self.kind.value,
+                origin=origin,
+                reason=f"HTTP error: {exc}",
+            ) from exc
+
+        # Try trafilatura first (better at extraction), then fall back to regex.
+        try:
+            import trafilatura
+            text = trafilatura.extract(response.content, include_comments=False, include_tables=True)
+            if text:
+                return text, None
+        except ImportError:
+            pass
+
+        import re
+        text = re.sub(r"<[^>]+>", " ", response.text)
+        text = re.sub(r"\s+", " ", text).strip()
         return text, None
