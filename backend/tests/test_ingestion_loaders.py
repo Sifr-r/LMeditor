@@ -8,7 +8,11 @@ from pathlib import Path
 import pytest
 
 from lmeditor.core.exceptions import SourceLoadError
-from lmeditor.ingestion.loaders import TextSourceLoader
+from lmeditor.ingestion.loaders import (
+    HtmlSourceLoader,
+    MarkdownSourceLoader,
+    TextSourceLoader,
+)
 
 
 # ============================================================================
@@ -49,5 +53,66 @@ def test_text_loader_rejects_binary_file() -> None:
     loader = TextSourceLoader()
     with pytest.raises(SourceLoadError):
         loader.load(path)
+
+    path.unlink()
+
+
+# ============================================================================
+# 2. MarkdownSourceLoader Tests (Task 6)
+# ============================================================================
+
+
+def test_markdown_loader_strips_heading_markers() -> None:
+    """Verify MarkdownSourceLoader strips ATX heading markers and emphasis."""
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False, encoding="utf-8") as f:
+        f.write("# Title\n\nSome **bold** text.\n\n## Sub\nMore.\n")
+        path = Path(f.name)
+
+    loader = MarkdownSourceLoader()
+    text, page_count = loader.load(path)
+
+    assert "Title" in text
+    assert "Some bold text." in text  # markdownify strips **
+    assert page_count is None
+
+    path.unlink()
+
+
+def test_markdown_loader_preserves_paragraph_breaks() -> None:
+    """Verify MarkdownSourceLoader keeps each paragraph individually readable."""
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False, encoding="utf-8") as f:
+        f.write("First paragraph.\n\nSecond paragraph.\n\nThird.\n")
+        path = Path(f.name)
+
+    loader = MarkdownSourceLoader()
+    text, _ = loader.load(path)
+    assert "First paragraph." in text
+    assert "Second paragraph." in text
+    assert "Third." in text
+
+    path.unlink()
+
+
+# ============================================================================
+# 3. HtmlSourceLoader Tests (Task 6)
+# ============================================================================
+
+
+def test_html_loader_extracts_visible_text() -> None:
+    """Verify HtmlSourceLoader extracts visible text and strips <script> bodies."""
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".html", delete=False, encoding="utf-8") as f:
+        f.write(
+            "<html><head><title>Ignored Title</title></head>"
+            "<body><h1>Real Title</h1><p>Body text here.</p>"
+            "<script>alert('nope')</script></body></html>"
+        )
+        path = Path(f.name)
+
+    loader = HtmlSourceLoader()
+    text, _ = loader.load(path)
+
+    assert "Real Title" in text
+    assert "Body text here." in text
+    assert "alert('nope')" not in text  # script stripped
 
     path.unlink()

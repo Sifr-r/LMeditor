@@ -46,3 +46,70 @@ class TextSourceLoader(SourceLoader):
                 reason=f"file is not valid UTF-8: {exc}",
             ) from exc
         return text, None
+
+
+class MarkdownSourceLoader(SourceLoader):
+    """Loads a Markdown file and converts to plain text via markdownify."""
+
+    kind = SourceKind.MARKDOWN
+
+    def load(self, path: Path) -> tuple[str, Optional[int]]:
+        if not path.exists():
+            raise SourceLoadError(
+                kind=self.kind.value,
+                origin=str(path),
+                reason=f"file does not exist: {path}",
+            )
+        try:
+            from markdownify import markdownify  # local import; soft dep
+            raw = path.read_text(encoding="utf-8")
+            text = markdownify(raw, heading_style="ATX").strip()
+        except UnicodeDecodeError as exc:
+            raise SourceLoadError(
+                kind=self.kind.value,
+                origin=str(path),
+                reason=f"file is not valid UTF-8: {exc}",
+            ) from exc
+        except ImportError as exc:
+            raise SourceLoadError(
+                kind=self.kind.value,
+                origin=str(path),
+                reason=f"markdownify not installed: {exc}",
+            ) from exc
+        return text, None
+
+
+class HtmlSourceLoader(SourceLoader):
+    """Loads an HTML file and extracts visible text via trafilatura."""
+
+    kind = SourceKind.HTML
+
+    def load(self, path: Path) -> tuple[str, Optional[int]]:
+        if not path.exists():
+            raise SourceLoadError(
+                kind=self.kind.value,
+                origin=str(path),
+                reason=f"file does not exist: {path}",
+            )
+        try:
+            import trafilatura  # local import; soft dep
+            raw = path.read_bytes()
+            text = trafilatura.extract(raw, include_comments=False, include_tables=True)
+            if text is None:
+                # Fallback: strip tags with a simple regex if trafilatura bails
+                import re
+                text = re.sub(r"<[^>]+>", " ", raw.decode("utf-8", errors="replace"))
+                text = re.sub(r"\s+", " ", text).strip()
+        except UnicodeDecodeError as exc:
+            raise SourceLoadError(
+                kind=self.kind.value,
+                origin=str(path),
+                reason=f"file is not valid UTF-8: {exc}",
+            ) from exc
+        except ImportError as exc:
+            raise SourceLoadError(
+                kind=self.kind.value,
+                origin=str(path),
+                reason=f"trafilatura not installed: {exc}",
+            ) from exc
+        return text or "", None
