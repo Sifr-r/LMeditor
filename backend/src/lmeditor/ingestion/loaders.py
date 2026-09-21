@@ -49,7 +49,12 @@ class TextSourceLoader(SourceLoader):
 
 
 class MarkdownSourceLoader(SourceLoader):
-    """Loads a Markdown file and converts to plain text via markdownify."""
+    """Loads a Markdown file and converts it to plain text.
+
+    Uses the ``markdown`` package (MD → HTML) followed by a tag-stripping
+    pass, because ``markdownify`` is HTML → Markdown (the wrong direction
+    for stripping markdown syntax from markdown input).
+    """
 
     kind = SourceKind.MARKDOWN
 
@@ -61,9 +66,12 @@ class MarkdownSourceLoader(SourceLoader):
                 reason=f"file does not exist: {path}",
             )
         try:
-            from markdownify import markdownify  # local import; soft dep
+            import re  # local import; stdlib only, cheap
+            from markdown import Markdown  # local import; soft dep
             raw = path.read_text(encoding="utf-8")
-            text = markdownify(raw, heading_style="ATX").strip()
+            html = Markdown().convert(raw)
+            text = re.sub(r"<[^>]+>", " ", html)
+            text = re.sub(r"\s+", " ", text).strip()
         except UnicodeDecodeError as exc:
             raise SourceLoadError(
                 kind=self.kind.value,
@@ -74,7 +82,7 @@ class MarkdownSourceLoader(SourceLoader):
             raise SourceLoadError(
                 kind=self.kind.value,
                 origin=str(path),
-                reason=f"markdownify not installed: {exc}",
+                reason=f"markdown not installed: {exc}",
             ) from exc
         return text, None
 

@@ -72,7 +72,7 @@ def test_markdown_loader_strips_heading_markers() -> None:
     text, page_count = loader.load(path)
 
     assert "Title" in text
-    assert "Some bold text." in text  # markdownify strips **
+    assert "Some bold text." in text  # markdown package + tag-strip removes **
     assert page_count is None
 
     path.unlink()
