@@ -9,8 +9,10 @@ import pytest
 
 from lmeditor.core.exceptions import SourceLoadError
 from lmeditor.ingestion.loaders import (
+    DocxSourceLoader,
     HtmlSourceLoader,
     MarkdownSourceLoader,
+    PdfSourceLoader,
     TextSourceLoader,
 )
 
@@ -116,3 +118,49 @@ def test_html_loader_extracts_visible_text() -> None:
     assert "alert('nope')" not in text  # script stripped
 
     path.unlink()
+
+
+# ============================================================================
+# 4. PdfSourceLoader Tests (Task 8)
+# ============================================================================
+
+
+def test_pdf_loader_reads_page_count() -> None:
+    """Verify PdfSourceLoader reports page_count>=1 for a valid PDF fixture."""
+    fixture = Path(__file__).parent / "fixtures" / "minimal.pdf"
+    if not fixture.exists():
+        pytest.skip("tests/fixtures/minimal.pdf not generated; see Task 8 fixture helper")
+    loader = PdfSourceLoader()
+    text, page_count = loader.load(fixture)
+    assert page_count is not None and page_count >= 1
+    assert isinstance(text, str)
+
+
+def test_pdf_loader_rejects_non_pdf() -> None:
+    """Verify PdfSourceLoader raises SourceLoadError when given non-PDF bytes."""
+    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:
+        f.write(b"this is not a pdf")
+        path = Path(f.name)
+    try:
+        loader = PdfSourceLoader()
+        with pytest.raises(SourceLoadError, match="Failed to load pdf source"):
+            loader.load(path)
+    finally:
+        path.unlink(missing_ok=True)
+
+
+# ============================================================================
+# 5. DocxSourceLoader Tests (Task 8)
+# ============================================================================
+
+
+def test_docx_loader_reads_text() -> None:
+    """Verify DocxSourceLoader extracts paragraph text from a valid DOCX fixture."""
+    fixture = Path(__file__).parent / "fixtures" / "minimal.docx"
+    if not fixture.exists():
+        pytest.skip("tests/fixtures/minimal.docx not generated")
+    loader = DocxSourceLoader()
+    text, page_count = loader.load(fixture)
+    assert isinstance(text, str) and len(text) > 0
+    assert "Hello from a test DOCX." in text
+    assert page_count is None

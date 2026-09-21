@@ -121,3 +121,83 @@ class HtmlSourceLoader(SourceLoader):
                 reason=f"trafilatura not installed: {exc}",
             ) from exc
         return text or "", None
+
+
+class PdfSourceLoader(SourceLoader):
+    """Loads a PDF file via ``pypdf`` and returns its page count.
+
+    Text is extracted via :meth:`pypdf.PageObject.extract_text`, which yields
+    an empty string for scanned/blank pages. The ``page_count`` is always
+    returned when the PDF can be opened; ``text`` may be empty.
+    """
+
+    kind = SourceKind.PDF
+
+    def load(self, path: Path) -> tuple[str, Optional[int]]:
+        if not path.exists():
+            raise SourceLoadError(
+                kind=self.kind.value,
+                origin=str(path),
+                reason=f"file does not exist: {path}",
+            )
+        try:
+            from pypdf import PdfReader  # local import; soft dep
+            reader = PdfReader(str(path))
+            page_count: int = len(reader.pages)
+            text_parts: list[str] = []
+            for page in reader.pages:
+                extracted = page.extract_text() or ""
+                text_parts.append(extracted)
+            text = "\n\n".join(text_parts).strip()
+        except ImportError as exc:
+            raise SourceLoadError(
+                kind=self.kind.value,
+                origin=str(path),
+                reason=f"pypdf not installed: {exc}",
+            ) from exc
+        except Exception as exc:
+            # Catches pypdf.errors.* (e.g., EmptyFileError, PdfReadError)
+            # and any other raised exception during parsing.
+            raise SourceLoadError(
+                kind=self.kind.value,
+                origin=str(path),
+                reason=f"pypdf failed: {exc}",
+            ) from exc
+        return text, page_count
+
+
+class DocxSourceLoader(SourceLoader):
+    """Loads a DOCX file via ``python-docx`` and returns paragraph text.
+
+    DOCX has no native pagination concept, so ``page_count`` is always
+    ``None``. Paragraph text is joined with blank lines.
+    """
+
+    kind = SourceKind.DOCX
+
+    def load(self, path: Path) -> tuple[str, Optional[int]]:
+        if not path.exists():
+            raise SourceLoadError(
+                kind=self.kind.value,
+                origin=str(path),
+                reason=f"file does not exist: {path}",
+            )
+        try:
+            from docx import Document  # local import; python-docx soft dep
+            doc = Document(str(path))
+            paragraphs: list[str] = [p.text for p in doc.paragraphs if p.text.strip()]
+            text = "\n\n".join(paragraphs).strip()
+        except ImportError as exc:
+            raise SourceLoadError(
+                kind=self.kind.value,
+                origin=str(path),
+                reason=f"python-docx not installed: {exc}",
+            ) from exc
+        except Exception as exc:
+            # Catches docx.opc.exceptions.PackageNotFoundError and friends.
+            raise SourceLoadError(
+                kind=self.kind.value,
+                origin=str(path),
+                reason=f"python-docx failed: {exc}",
+            ) from exc
+        return text, None
