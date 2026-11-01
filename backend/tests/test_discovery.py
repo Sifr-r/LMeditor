@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import hashlib
-from typing import Sequence
+from typing import Any, Sequence
+
+import dspy
 import pytest
+from dspy.dsp.utils.utils import dotdict
 
 from lmeditor.core.exceptions import (
     DialogueError,
     OutlineGenerationError,
+    PerspectiveGenerationError,
     ValidationError,
 )
 from lmeditor.core.schemas import (
@@ -54,8 +58,39 @@ def make_chunk(text: str, doc_id: str = "doc_test_1", start: int = 0) -> SourceC
     )
 
 
+class _StubLM(dspy.BaseLM):
+    """A language-model double that answers the discovery signatures."""
+
+    def __init__(self, answers: dict[str, str] | None = None, fail: bool = False) -> None:
+        super().__init__("stub", "chat", 0.0, 1000, True)
+        self.answers = answers or {}
+        self.fail = fail
+        self.calls: list[str] = []
+
+    def forward(self, prompt=None, messages=None, **kwargs: Any) -> Any:
+        messages = messages or [{"role": "user", "content": prompt}]
+        content = str(messages[-1]["content"])
+        self.calls.append(content)
+        if self.fail:
+            raise RuntimeError("model server unreachable")
+        body = "\n".join(f"[[ ## {name} ## ]]\n{value}" for name, value in self.answers.items())
+        message = dotdict(content=body, tool_calls=None)
+        return dotdict(
+            choices=[dotdict(message=message, finish_reason="stop")],
+            usage=dotdict(prompt_tokens=0, completion_tokens=0, total_tokens=0),
+            model="stub",
+        )
+
+
+@pytest.fixture()
+def restore_lm() -> Any:
+    """Restore whatever language model was installed before the test."""
+    previous = dspy.settings.lm
+    yield previous
+    dspy.configure(lm=previous)
+
+
 class MockProvenanceIndexer(ProvenanceIndexerProtocol):
-    """Deterministic mock indexer for testing conversational dialogue loops."""
 
     def __init__(self, chunks: Sequence[SourceChunk] | None = None, fail_queries: bool = False) -> None:
         self.chunks = list(chunks) if chunks else []
@@ -131,8 +166,178 @@ def test_perspective_generator_bounds_and_roles() -> None:
     assert expected_roles == actual_roles
 
 
+WASTE_CONTEXT = (
+    "Municipal waste collection rates fell by 30 percent between 2019 and 2023. "
+    "Kerbside recycling throughput doubled after the 2022 fleet replacement. "
+    "Landfill charges rose 12 percent, raising the cost of residual waste."
+)
+
+QUANTUM_CONTEXT = (
+    "Quantum key distribution tolerates photon loss through decoy state protocols. "
+    "Post-quantum lattice schemes resist Shor's attack at 128-bit security. "
+    "Entanglement fidelity of 99.9 percent was measured on the metropolitan link."
+)
+
+
+def test_perspectives_are_grounded_in_the_supplied_context() -> None:
+    """A persona's substance comes from the material it will interrogate."""
+    generator = PerspectiveGenerator()
+    perspectives = generator.generate_perspectives(
+        "Municipal Waste", context=WASTE_CONTEXT, num_perspectives=3
+    )
+
+    assert len(perspectives) == 3
+    for perspective in perspectives:
+        blob = " ".join(
+            [
+                perspective.description,
+                *perspective.focus_areas,
+                *perspective.guiding_questions,
+                *perspective.key_inquiries,
+            ]
+        ).lower()
+        assert any(
+            term in blob
+            for term in ("waste", "collection", "recycling", "landfill", "kerbside", "fleet")
+        ), f"perspective is not grounded in the context: {blob!r}"
+
+
+def test_perspectives_differ_between_contexts() -> None:
+    """The same topic with different material yields different personas."""
+    generator = PerspectiveGenerator()
+    waste = generator.generate_perspectives(
+        "Municipal Waste", context=WASTE_CONTEXT, num_perspectives=2
+    )
+    quantum = generator.generate_perspectives(
+        "Post-Quantum Cryptography", context=QUANTUM_CONTEXT, num_perspectives=2
+    )
+
+    assert [p.description for p in waste] != [p.description for p in quantum]
+    assert [p.guiding_questions for p in waste] != [p.guiding_questions for p in quantum]
+
+    quantum_blob = " ".join(
+        [
+            quantum[0].description,
+            *quantum[0].focus_areas,
+            *quantum[0].guiding_questions,
+        ]
+    ).lower()
+    assert any(
+        term in quantum_blob for term in ("quantum", "photon", "lattice", "entanglement", "decoy")
+    )
+
+
+def test_outline_uses_the_language_model_when_use_dspy_is_enabled(restore_lm: Any) -> None:
+    """``use_dspy`` really controls the language-model path."""
+    chunks = [
+        make_chunk("Municipal waste collection rates fell by 30 percent between 2019 and 2023.", start=0),
+        make_chunk("Kerbside recycling throughput doubled after the fleet replacement.", start=200),
+    ]
+    dspy.configure(
+        lm=_StubLM(
+            answers={
+                "outline_json": (
+                    '[{"title": "Municipal Waste Collection", '
+                    '"description": "Collection throughput and charges.", '
+                    '"keywords": ["collection", "waste", "kerbside"]}]'
+                )
+            }
+        )
+    )
+
+    generator = OutlineGenerator(use_dspy=True)
+    memory = conduct_all_dialogues(
+        generate_perspectives("Municipal Waste", num_perspectives=1),
+        MockProvenanceIndexer(chunks=chunks),
+        turns_per_session=1,
+    )
+    outline = generator.generate_outline(
+        topic="Municipal Waste", research_memory=memory, available_chunks=chunks
+    )
+
+    titles = " ".join(node.title for node in outline.nodes)
+    assert "Municipal Waste Collection" in titles
+
+
+def test_outline_without_a_language_model_ignores_use_dspy(restore_lm: Any) -> None:
+    """With no model configured the generator falls back cleanly."""
+    dspy.configure(lm=None)
+
+    chunks = [
+        make_chunk("Municipal waste collection rates fell by 30 percent between 2019 and 2023.", start=0),
+        make_chunk("Kerbside recycling throughput doubled after the fleet replacement.", start=200),
+    ]
+
+    generator = OutlineGenerator(use_dspy=True)
+    memory = conduct_all_dialogues(
+        generate_perspectives("Municipal Waste", num_perspectives=1),
+        MockProvenanceIndexer(chunks=chunks),
+        turns_per_session=1,
+    )
+    outline = generator.generate_outline(
+        topic="Municipal Waste", research_memory=memory, available_chunks=chunks
+    )
+
+    titles = " ".join(node.title for node in outline.nodes).lower()
+    assert any(term in titles for term in ("waste", "collection", "recycling", "kerbside"))
+
+
+def test_dialogue_uses_the_language_model_when_use_dspy_is_enabled(restore_lm: Any) -> None:
+    """``use_dspy`` really controls the language-model path."""
+    chunk = make_chunk(
+        "Landfill charges rose 12 percent over the same period.",
+        start=0,
+    )
+    dspy.configure(
+        lm=_StubLM(
+            answers={"synthesis": "The retrieved passage reports a rise in landfill charges."}
+        )
+    )
+
+    perspective = Perspective(
+        perspective_id="persp_expert_3",
+        id="persp_expert_3",
+        role=PerspectiveRole.DOMAIN_EXPERT,
+        title="Domain Expert",
+        name="Domain Expert",
+        description="Reads the reported figures.",
+        domain="Municipal Waste",
+        guiding_questions=["What did landfill charges do?"],
+        focus_areas=["Cost of residual waste"],
+    )
+
+    loop = DialogueLoop(use_dspy=True, top_k_per_turn=1)
+    session = loop.conduct_dialogue(perspective, MockProvenanceIndexer(chunks=[chunk]), num_turns=1)
+
+    answer = session.turns[0].answer
+    assert "The retrieved passage reports a rise in landfill charges." in answer
+    # The grounded quotation is still added by the module itself.
+    assert f"[{chunk.chunk_id}]" in answer
+    assert "12 percent" in answer
+
+
+def test_perspective_generation_failure_is_not_swallowed() -> None:
+    """A language model that fails must not degrade into a generic persona list."""
+    import dspy
+
+    class BrokenLM(dspy.BaseLM):
+        def __init__(self) -> None:
+            super().__init__("broken", "chat", 0.0, 1000, True)
+
+        def forward(self, prompt=None, messages=None, **kwargs):
+            raise RuntimeError("model server unreachable")
+
+    previous = dspy.settings.lm
+    dspy.configure(lm=BrokenLM())
+    try:
+        generator = PerspectiveGenerator(use_dspy=True)
+        with pytest.raises(PerspectiveGenerationError):
+            generator.generate_perspectives("Municipal Waste", context=WASTE_CONTEXT, num_perspectives=2)
+    finally:
+        dspy.configure(lm=previous)
+
+
 def test_perspective_generator_validation_failures() -> None:
-    """Test input boundary validation on PerspectiveGenerator."""
     generator = PerspectiveGenerator()
 
     # Blank topic
@@ -229,8 +434,70 @@ def test_dialogue_conduct_all_and_research_memory() -> None:
     assert len(memory.collected_takeaways) >= 4
 
 
+def test_dialogue_answers_quote_the_retrieved_passage() -> None:
+    """An answer quotes the passage that bears on the question and names it."""
+    chunk = make_chunk(
+        "Municipal waste collection rates fell by 30 percent between 2019 and 2023. "
+        "Kerbside recycling throughput doubled after the fleet replacement.",
+        start=0,
+    )
+    indexer = MockProvenanceIndexer(chunks=[chunk])
+
+    perspective = Perspective(
+        perspective_id="persp_critic_1",
+        id="persp_critic_1",
+        role=PerspectiveRole.SKEPTIC,
+        title="Empirical Critic",
+        name="Empirical Critic",
+        description="Interrogates the reported figures.",
+        domain="Municipal Waste",
+        guiding_questions=["What happened to waste collection rates?"],
+        focus_areas=["Reported collection rates"],
+    )
+
+    loop = DialogueLoop(top_k_per_turn=1)
+    session = loop.conduct_dialogue(perspective, indexer, num_turns=1)
+
+    turn = session.turns[0]
+    assert turn.referenced_chunk_ids == [chunk.chunk_id]
+    assert f"[{chunk.chunk_id}]" in turn.answer
+    # The answer quotes the passage rather than describing it in the abstract.
+    assert "30 percent" in turn.answer
+    assert "Municipal waste collection rates fell" in turn.answer
+
+
+def test_dialogue_takeaways_are_derived_from_the_turns() -> None:
+    """The takeaways name the evidence that carried the session."""
+    chunk = make_chunk(
+        "Landfill charges rose 12 percent over the same period.",
+        start=0,
+    )
+    indexer = MockProvenanceIndexer(chunks=[chunk])
+
+    perspective = Perspective(
+        perspective_id="persp_expert_2",
+        id="persp_expert_2",
+        role=PerspectiveRole.DOMAIN_EXPERT,
+        title="Domain Expert",
+        name="Domain Expert",
+        description="Reads the reported figures.",
+        domain="Municipal Waste",
+        guiding_questions=["What did landfill charges do?"],
+        focus_areas=["Cost of residual waste"],
+    )
+
+    loop = DialogueLoop(top_k_per_turn=1)
+    session = loop.conduct_dialogue(perspective, indexer, num_turns=2)
+
+    takeaways = " ".join(session.synthesized_takeaways)
+    assert len(session.synthesized_takeaways) >= 2
+    # The takeaway names the passage that carried the session ...
+    assert chunk.chunk_id in takeaways
+    # ... and repeats what that passage actually said.
+    assert "12 percent" in takeaways
+
+
 def test_dialogue_boundary_validations() -> None:
-    """Test input boundary validation on DialogueLoop."""
     loop = DialogueLoop()
     indexer = MockProvenanceIndexer()
 
@@ -279,7 +546,9 @@ def test_outline_generator_hierarchy_and_leaf_assignment() -> None:
 
     assert isinstance(outline, TopicOutline)
     assert outline.topic == "Verifiable LLM Writing Systems"
-    assert len(outline.nodes) >= 5
+    # The shape of the outline follows the material: it is derived from the
+    # chunks, so the number of sections is not a fixed constant any more.
+    assert len(outline.nodes) >= 1
 
     # Invariant: Root nodes MUST have children and MUST NOT have assigned chunks
     for root in outline.nodes:
@@ -288,8 +557,9 @@ def test_outline_generator_hierarchy_and_leaf_assignment() -> None:
 
     # Invariant: Leaves MUST have assigned chunks
     leaves = outline.get_leaves()
-    assert len(leaves) >= 10
+    assert len(leaves) >= 1
     valid_cids = {c.chunk_id for c in chunks}
+    assigned: list[str] = []
 
     for leaf in leaves:
         assert leaf.is_leaf is True
@@ -297,6 +567,83 @@ def test_outline_generator_hierarchy_and_leaf_assignment() -> None:
         for cid in leaf.assigned_chunk_ids:
             # Every assigned chunk must strictly exist in available_chunks
             assert cid in valid_cids
+            assigned.append(cid)
+
+    # Every chunk is placed exactly once.
+    assert sorted(assigned) == sorted(valid_cids)
+
+
+def test_outline_is_derived_from_the_corpus_and_not_a_fixed_skeleton() -> None:
+    """Two different corpora must not produce the same outline."""
+    waste_chunks = [
+        make_chunk("Municipal waste collection rates fell by 30 percent between 2019 and 2023.", start=0),
+        make_chunk("Kerbside recycling throughput doubled after the 2022 fleet replacement.", start=200),
+        make_chunk("Landfill charges rose 12 percent, raising the cost of residual waste.", start=400),
+    ]
+    quantum_chunks = [
+        make_chunk("Quantum key distribution tolerates photon loss through decoy state protocols.", start=0),
+        make_chunk("Post-quantum lattice schemes resist Shor's attack at 128-bit security.", start=200),
+        make_chunk("Entanglement fidelity of 99.9 percent was measured on the metropolitan link.", start=400),
+    ]
+
+    generator = OutlineGenerator()
+
+    waste_memory = conduct_all_dialogues(
+        generate_perspectives("Municipal Waste", num_perspectives=1),
+        MockProvenanceIndexer(chunks=waste_chunks),
+        turns_per_session=1,
+    )
+    quantum_memory = conduct_all_dialogues(
+        generate_perspectives("Post-Quantum Cryptography", num_perspectives=1),
+        MockProvenanceIndexer(chunks=quantum_chunks),
+        turns_per_session=1,
+    )
+
+    waste_outline = generator.generate_outline(
+        topic="Municipal Waste", research_memory=waste_memory, available_chunks=waste_chunks
+    )
+    quantum_outline = generator.generate_outline(
+        topic="Post-Quantum Cryptography",
+        research_memory=quantum_memory,
+        available_chunks=quantum_chunks,
+    )
+
+    waste_titles = " ".join(node.title for node in waste_outline.nodes)
+    quantum_titles = " ".join(node.title for node in quantum_outline.nodes)
+
+    assert waste_titles != quantum_titles
+
+    # The headings name the material they cover.
+    assert any(
+        term in waste_titles.lower()
+        for term in ("waste", "collection", "recycling", "landfill", "kerbside", "fleet")
+    )
+    assert any(
+        term in quantum_titles.lower()
+        for term in ("quantum", "key", "lattice", "entanglement", "photon", "decoy")
+    )
+
+
+def test_outline_uses_headings_the_source_already_carries() -> None:
+    """A document with its own headings is organised by those headings."""
+    chunks = [
+        make_chunk("## Kerbside Collection\nCollection frequency rose to weekly in 2023.", start=0),
+        make_chunk("## Landfill Charges\nCharges rose 12 percent over the same period.", start=200),
+    ]
+
+    generator = OutlineGenerator()
+    memory = conduct_all_dialogues(
+        generate_perspectives("Municipal Waste", num_perspectives=1),
+        MockProvenanceIndexer(chunks=chunks),
+        turns_per_session=1,
+    )
+    outline = generator.generate_outline(
+        topic="Municipal Waste", research_memory=memory, available_chunks=chunks
+    )
+
+    titles = " ".join(node.title for node in outline.nodes)
+    assert "Kerbside Collection" in titles
+    assert "Landfill Charges" in titles
 
 
 def test_outline_dag_acyclicity_and_duplicate_rejection() -> None:

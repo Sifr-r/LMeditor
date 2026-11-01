@@ -1,30 +1,134 @@
-"""Stanford STORM multi-perspective persona discovery engine for LMeditor."""
+"""The personas, as the Kotlin tier implements them.
+
+A perspective here is not a job title with the topic pasted into it. The
+archetype table supplies the *stance* -- the expert, the skeptic, the
+practitioner, the regulator, the analyst, the expositor -- while the
+substance of every persona (its description, its focus areas, its guiding
+questions and its key inquiries) is taken from the material the persona is
+supposed to interrogate.
+
+How a persona is built from that material is a rule, and the rule is Kotlin's:
+it is implemented once, in ``lmeditor.discovery``, and the tier serves it
+across the NDJSON seam.
+
+This module is the **door**: it keeps the Python API the rest of the backend
+calls, and answers with the tier's answers. The implementation it used to
+carry now lives in ``lmeditor._reference.perspective``, frozen, so the parity
+harness can still ask both sides the same question.
+
+The language model stays Python's. A model is model-bound work: it reads the
+context and writes the personas. DSPy is imported only when that path is
+taken, so the deterministic door does not need the dependency at all.
+"""
 
 from __future__ import annotations
 
+import json
+import logging
 import re
-from typing import Any, Sequence
-import dspy
+from typing import TYPE_CHECKING, Any
 
+from lmeditor.bridge import BridgeUnavailableError
+from lmeditor.bridge.errors import KotlinDomainError
 from lmeditor.core.exceptions import PerspectiveGenerationError, ValidationError
 from lmeditor.core.schemas import Perspective
 from lmeditor.core.types import PerspectiveRole
+from lmeditor.tier import discovery as tier_discovery
+
+if TYPE_CHECKING:
+    import dspy
+
+logger = logging.getLogger(__name__)
+
+#: The DSPy module, imported on demand. ``None`` until something asks for it.
+_dspy: Any = None
 
 
-class PerspectiveDiscoverySignature(dspy.Signature):
-    """Discover diverse expert and skeptic personas to research a topic from multiple angles."""
+def _dspy_module() -> Any:
+    """Import DSPy on demand.
 
-    topic: str = dspy.InputField(desc="The core subject, thesis, or problem statement to investigate")
-    context: str = dspy.InputField(desc="Optional background knowledge, source excerpts, or constraints")
-    num_perspectives: int = dspy.InputField(desc="Number of distinct personas to generate (between 1 and 10)")
-    perspectives_json: str = dspy.OutputField(
-        desc="JSON array of persona objects with role, title, description, focus_areas, and guiding_questions"
-    )
+    The deterministic path -- the tier's -- needs no language model, so this
+    module must not need DSPy to be imported. Only the language-model path
+    does, and it asks for it here.
+    """
+    global _dspy  # noqa: PLW0603 - the module-level cache of the DSPy module
+
+    if _dspy is None:
+        import dspy
+
+        _dspy = dspy
+    return _dspy
+
+
+def _build_signature() -> type:
+    """Build the DSPy signature of the persona discovery program."""
+    # The module is fetched under a name of its own. A local called ``dspy``
+    # would shadow the module-level import of the same name, and the signature
+    # -- whose base class is resolved from the module -- would then be built
+    # from a name mypy cannot follow.
+    dspy_module = _dspy_module()
+    # The base class is looked up by name rather than written as a dotted
+    # attribute. A dotted base class is a *name* to a type checker, and the
+    # module is fetched at run time, so the checker is told the name does not
+    # exist. The lookup is the same at run time; only the spelling differs.
+    signature_base: Any = getattr(dspy_module, "Signature")
+
+    class PerspectiveDiscoverySignature(signature_base):
+        """Discover diverse expert and skeptic personas to research a topic from multiple angles."""
+
+        topic: str = dspy_module.InputField(desc="The core subject, thesis, or problem statement to investigate")
+        context: str = dspy_module.InputField(desc="Optional background knowledge, source excerpts, or constraints")
+        num_perspectives: int = dspy_module.InputField(desc="Number of distinct personas to generate (between 1 and 10)")
+        perspectives_json: str = dspy_module.OutputField(
+            desc="JSON array of persona objects with role, title, description, focus_areas, and guiding_questions"
+        )
+
+    # The class is built inside a function, so its qualified name would carry
+    # the function's name. Put it back to what a module-level class looks like.
+    PerspectiveDiscoverySignature.__qualname__ = "PerspectiveDiscoverySignature"
+    return PerspectiveDiscoverySignature
+
+
+def _perspective_signature() -> type:
+    """The signature class, built once and then kept."""
+    signature = globals().get("PerspectiveDiscoverySignature")
+    if signature is None:
+        signature = _build_signature()
+        globals()["PerspectiveDiscoverySignature"] = signature
+    return signature
+
+
+def __getattr__(name: str) -> Any:
+    """Build the DSPy signature on first access (PEP 562).
+
+    ``PerspectiveDiscoverySignature`` is a ``dspy.Signature`` subclass, and a
+    signature is needed to *define* it. Building it on first access is what
+    lets this module be imported without DSPy installed, while the name stays
+    importable exactly as it was.
+    """
+    if name == "PerspectiveDiscoverySignature":
+        return _perspective_signature()
+    if name == "dspy":
+        return _dspy_module()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 class PerspectiveGenerator:
-    """Stanford STORM-style persona synthesizer creating diverse investigative lenses."""
+    """Persona synthesizer that grounds every perspective in the supplied context.
 
+    Args:
+        use_dspy: Whether to use a language model to write the personas. The
+            flag only takes effect when a language model is configured; with
+            no model the generator asks the tier for the personas it derives
+            from the context.
+        model: Optional DSPy language model instance or predictor override.
+    """
+
+    #: The archetype table: the stance of each persona role.
+    #:
+    #: The tier holds the same table (``PerspectiveGenerator.ROLE_ARCHETYPES``)
+    #: and is the one that applies it. It is kept here because it is part of
+    #: the Python API; the seam does not expose the table.
     ROLE_ARCHETYPES: list[tuple[PerspectiveRole, str, str, list[str], list[str]]] = [
         (
             PerspectiveRole.DOMAIN_EXPERT,
@@ -122,7 +226,7 @@ class PerspectiveGenerator:
         """Initialize the perspective generator.
 
         Args:
-            use_dspy: Whether to utilize DSPy LM predictions if configured.
+            use_dspy: Whether to use a language model to write the personas.
             model: Optional DSPy language model instance or predictor override.
         """
         self.use_dspy = use_dspy
@@ -130,8 +234,10 @@ class PerspectiveGenerator:
         self._predictor: dspy.Predict | None = None
         if self.use_dspy:
             try:
-                self._predictor = dspy.Predict(PerspectiveDiscoverySignature)
-            except Exception:
+                dspy = _dspy_module()
+                self._predictor = dspy.Predict(_perspective_signature())
+            except Exception as exc:  # noqa: BLE001 - a broken DSPy install is reported below
+                logger.warning("Could not build the perspective predictor: %s", exc)
                 self._predictor = None
 
     def validate_inputs(self, topic: str, num_perspectives: int) -> str:
@@ -185,88 +291,105 @@ class PerspectiveGenerator:
         num_perspectives: int = 4,
         max_perspectives: int | None = None,
     ) -> list[Perspective]:
-        target_count = max_perspectives if max_perspectives is not None else num_perspectives
         """Generate diverse investigative perspectives for a topic.
 
         Args:
             topic: Research subject or thesis.
-            context: Optional domain context or background excerpts.
+            context: Optional domain context or background excerpts. The
+                personas are grounded in this material.
             num_perspectives: Count of personas to generate (1 to 10).
+            max_perspectives: Overrides ``num_perspectives`` when supplied.
 
         Returns:
             List of validated Perspective models.
 
         Raises:
             ValidationError: If input parameters violate boundary rules.
-            PerspectiveGenerationError: If persona synthesis fails unexpectedly.
+            PerspectiveGenerationError: If persona synthesis fails.
+            BridgeUnavailableError: If the Kotlin tier cannot be reached.
         """
+        target_count = max_perspectives if max_perspectives is not None else num_perspectives
         clean_topic = self.validate_inputs(topic, target_count)
         clean_context = (context or "").strip()
 
-        if self.use_dspy and self._predictor is not None:
-            try:
-                res = self._predictor(
-                    topic=clean_topic,
-                    context=clean_context or "General domain literature",
-                    num_perspectives=target_count,
-                )
-                parsed = self._try_parse_dspy_output(res.perspectives_json, clean_topic, target_count)
-                if parsed:
-                    return parsed
-            except Exception as exc:
-                # Log or fall back deterministically
-                pass
+        if self.use_dspy:
+            from lmeditor.llm import is_configured
 
-        # Deterministic Stanford STORM heuristic generation
-        return self._generate_heuristic_perspectives(clean_topic, clean_context, target_count)
+            if is_configured():
+                return self._generate_perspectives_with_lm(clean_topic, clean_context, target_count)
+            logger.info(
+                "Perspective generation is running without a language model; "
+                "deriving the personas from the supplied context instead."
+            )
 
-    def _generate_heuristic_perspectives(
+        return self._perspectives_from_tier(clean_topic, clean_context, target_count)
+
+    # ------------------------------------------------------------------
+    # The seam
+    # ------------------------------------------------------------------
+    def _perspectives_from_tier(
+        self,
+        clean_topic: str,
+        clean_context: str,
+        count: int,
+    ) -> list[Perspective]:
+        """The tier's answer: the personas it builds from the context."""
+        try:
+            return tier_discovery.generate_perspectives(clean_topic, clean_context, count)
+        except BridgeUnavailableError:
+            # The tier is not there. That is an infrastructure failure, not a
+            # bad input, and it must not be dressed up as one: the caller needs
+            # to know that the rule could not be answered at all.
+            raise
+        except KotlinDomainError as exc:
+            if exc.error_type == "PerspectiveGenerationError":
+                raise PerspectiveGenerationError(
+                    exc.message,
+                    details=dict(exc.details),
+                ) from exc
+            raise
+
+    # ------------------------------------------------------------------
+    # Language-model path
+    # ------------------------------------------------------------------
+    def _generate_perspectives_with_lm(
         self,
         topic: str,
         context: str,
         count: int,
     ) -> list[Perspective]:
-        """Produce rich, deterministic perspectives tailored to the topic."""
-        perspectives: list[Perspective] = []
-        archetypes = self.ROLE_ARCHETYPES
+        """Generate the personas with the configured language model.
 
-        for idx in range(count):
-            role, role_name, base_desc, base_focus, base_questions = archetypes[idx % len(archetypes)]
+        A model that fails, or that answers with something unusable, is a
+        real failure: it raises rather than silently degrading to a generic
+        persona list.
+        """
+        from lmeditor.llm import require_lm
 
-            # Tailor titles and questions to the specific topic
-            persp_id = f"persp_{role.value}_{idx + 1}"
-            title = f"{role_name} on {topic}"
-            desc = f"{base_desc} Specializing in analyzing '{topic}' with uncompromising domain depth."
+        require_lm("perspective discovery")
 
-            tailored_focus = [f"{focus} in the context of {topic}" for focus in base_focus]
-            tailored_questions = [
-                q.format(topic=topic) if "{topic}" in q else f"{q} ({topic})"
-                for q in base_questions
-            ]
-
-            if context:
-                tailored_focus.append(f"Empirical grounding against supplied source context ({len(context)} chars)")
-
-            perspective = Perspective(
-                perspective_id=persp_id,
-                id=persp_id,
-                role=role,
-                title=title,
-                name=title,
-                description=desc,
-                domain=topic,
-                focus_areas=tailored_focus,
-                prompt_directives=[
-                    f"Adopt the stance of a {role.value}.",
-                    f"Interrogate all claims about '{topic}' through rigorous evidence.",
-                    "Always mandate source passage attribution.",
-                ],
-                guiding_questions=tailored_questions,
-                key_inquiries=tailored_questions,
+        dspy = _dspy_module()
+        predictor = self._predictor or dspy.Predict(_perspective_signature())
+        try:
+            res = predictor(
+                topic=topic,
+                context=context or "General domain literature",
+                num_perspectives=count,
             )
-            perspectives.append(perspective)
+        except Exception as exc:
+            raise PerspectiveGenerationError(
+                f"Language model failed to generate perspectives: {exc}",
+                details={"topic": topic, "num_perspectives": count},
+            ) from exc
 
-        return perspectives
+        raw = str(getattr(res, "perspectives_json", "") or "")
+        parsed = self._try_parse_dspy_output(raw, topic, count)
+        if not parsed:
+            raise PerspectiveGenerationError(
+                "Language model returned no usable perspective payload.",
+                details={"topic": topic, "raw_output": raw[:500]},
+            )
+        return parsed
 
     def _try_parse_dspy_output(
         self,
@@ -275,8 +398,6 @@ class PerspectiveGenerator:
         target_count: int,
     ) -> list[Perspective] | None:
         """Safely parse and validate structured JSON returned from DSPy."""
-        import json
-
         try:
             # Extract JSON array from possible markdown fence
             cleaned = raw_json.strip()
@@ -301,8 +422,9 @@ class PerspectiveGenerator:
                 pid = item.get("id") or f"persp_{role.value}_{idx + 1}"
                 title = item.get("title") or item.get("name") or f"{role.value.capitalize()} Specialist"
                 desc = item.get("description", f"Expert investigating {topic}")
-                focus = item.get("focus_areas", [f"Core mechanics of {topic}"])
-                questions = item.get("guiding_questions", [f"What are the main dynamics of {topic}?"])
+                focus = item.get("focus_areas") or [f"Core mechanics of {topic}"]
+                questions = item.get("guiding_questions") or [f"What are the main dynamics of {topic}?"]
+                inquiries = item.get("key_inquiries") or questions
 
                 perspectives.append(
                     Perspective(
@@ -313,9 +435,9 @@ class PerspectiveGenerator:
                         name=title,
                         description=desc,
                         domain=topic,
-                        focus_areas=focus,
-                        guiding_questions=questions,
-                        key_inquiries=questions,
+                        focus_areas=list(focus),
+                        guiding_questions=list(questions),
+                        key_inquiries=list(inquiries),
                     )
                 )
 
@@ -339,7 +461,7 @@ def generate_perspectives(
 StormPerspectiveGenerator = PerspectiveGenerator
 
 __all__ = [
-    "PerspectiveDiscoverySignature",
+    "PerspectiveDiscoverySignature",  # noqa: F822 - built on first access (PEP 562)
     "PerspectiveGenerator",
     "StormPerspectiveGenerator",
     "generate_perspectives",

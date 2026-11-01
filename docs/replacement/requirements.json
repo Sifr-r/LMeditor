@@ -1,0 +1,1285 @@
+{
+  "schema_version": "1.0",
+  "roadmap": "docs/product-replacement-roadmap.md",
+  "stages": {
+    "M0": "M0 — contracts and evidence",
+    "M1": "M1 — trustworthy foundation",
+    "M2": "M2 — daily replacement",
+    "M3": "M3 — broad workflows",
+    "M4": "M4 — release qualification"
+  },
+  "statuses": [
+    "not-started",
+    "in-progress",
+    "evidence-partial",
+    "complete"
+  ],
+  "requirements": [
+    {
+      "id": "F.01",
+      "track": "F",
+      "title": "Durable workspace identity",
+      "section": "3",
+      "stage": "M1",
+      "owner": "kotlin:core",
+      "status": "in-progress",
+      "gate": "Create a workspace, a document, a note, a notebook and a source through the public API, then read back each assigned id and its schema version.",
+      "evidence": [
+        "kotlin/core/src/main/kotlin/lmeditor/core/Schemas.kt:1573",
+        "kotlin/core/src/main/kotlin/lmeditor/core/VaultSchemas.kt:27",
+        "kotlin/core/src/main/kotlin/lmeditor/core/NotebookSchemas.kt:26"
+      ],
+      "blocks": [
+        "P.01",
+        "P.02",
+        "P.04",
+        "P.05"
+      ]
+    },
+    {
+      "id": "F.02",
+      "track": "F",
+      "title": "Durable source archive",
+      "section": "3",
+      "stage": "M1",
+      "owner": "kotlin:server",
+      "status": "in-progress",
+      "gate": "Ingest a source, restart the backend, then read back the retained original, its chunks and its metadata from the durable source archive.",
+      "evidence": [
+        "kotlin/ingest/src/main/kotlin/lmeditor/ingest/SourceStore.kt:50",
+        "kotlin/server/src/main/kotlin/lmeditor/server/SourceLibrary.kt:15",
+        "kotlin/server/src/main/kotlin/lmeditor/server/SourceArchive.kt:28",
+        "backend/tests/test_source_persistence.py:1"
+      ],
+      "blocks": [
+        "N1.01",
+        "N1.05",
+        "N1.10",
+        "N2.03",
+        "N2.08",
+        "P.04",
+        "P.06",
+        "R.01"
+      ]
+    },
+    {
+      "id": "F.03",
+      "track": "F",
+      "title": "Safe atomic saves",
+      "section": "3",
+      "stage": "M1",
+      "owner": "kotlin:core",
+      "status": "in-progress",
+      "gate": "Interrupt a vault note write and a notebook manifest write, then read both files back and find the previous contents intact.",
+      "evidence": [
+        "kotlin/notebooks/src/main/kotlin/lmeditor/notebooks/NotebookStore.kt:470",
+        "kotlin/library/src/main/kotlin/lmeditor/library/BookStore.kt:883",
+        "kotlin/vault/src/main/kotlin/lmeditor/vault/VaultStore.kt:485"
+      ],
+      "blocks": [
+        "F.04",
+        "F.05",
+        "O1.07",
+        "P.06"
+      ]
+    },
+    {
+      "id": "F.04",
+      "track": "F",
+      "title": "Recovery and version restore",
+      "section": "3",
+      "stage": "M1",
+      "owner": "kotlin:library",
+      "status": "not-started",
+      "gate": "Kill the process mid-edit, restart it, then restore the acknowledged draft and the previous version from the recovery journal.",
+      "evidence": [],
+      "blocks": [
+        "R.03",
+        "R.04",
+        "R.12",
+        "P.06"
+      ]
+    },
+    {
+      "id": "F.05",
+      "track": "F",
+      "title": "External change detection",
+      "section": "3",
+      "stage": "M1",
+      "owner": "kotlin:vault",
+      "status": "not-started",
+      "gate": "Change a note on disk behind the editor, reopen it, then read a conflict copy instead of the overwritten draft.",
+      "evidence": [],
+      "blocks": [
+        "O1.07",
+        "O2.04",
+        "W3.05"
+      ]
+    },
+    {
+      "id": "F.06",
+      "track": "F",
+      "title": "Persistent job progress",
+      "section": "3",
+      "stage": "M1",
+      "owner": "kotlin:workflow",
+      "status": "in-progress",
+      "gate": "Cancel a running generation job, restart the service and resume the run, then read back that no duplicate artifact was written.",
+      "evidence": [
+        "backend/src/lmeditor/workflow/graph.py:147",
+        "kotlin/workflow/src/main/kotlin/lmeditor/workflow/HITLRegistry.kt:57"
+      ],
+      "blocks": [
+        "N2.04",
+        "N2.06",
+        "N2.07",
+        "N2.08",
+        "R.06"
+      ]
+    },
+    {
+      "id": "F.07",
+      "track": "F",
+      "title": "Unified navigation across workspaces",
+      "section": "3",
+      "stage": "M1",
+      "owner": "kotlin:desktop",
+      "status": "not-started",
+      "gate": "Open the command palette, quick-open a document, a note and a notebook, then read back the visible search scope for each.",
+      "evidence": [],
+      "blocks": []
+    },
+    {
+      "id": "F.08",
+      "track": "F",
+      "title": "Local operation without a provider",
+      "section": "3",
+      "stage": "M1",
+      "owner": "python:llm",
+      "status": "in-progress",
+      "gate": "Turn the provider off, edit a document and run a lexical search, then read the run log and find the stub named as the provider.",
+      "evidence": [
+        "backend/src/lmeditor/llm/stub.py:16",
+        "backend/src/lmeditor/llm/factory.py:48"
+      ],
+      "blocks": [
+        "W1.05",
+        "N2.10"
+      ]
+    },
+    {
+      "id": "F.09",
+      "track": "F",
+      "title": "Installable local delivery",
+      "section": "3",
+      "stage": "M1",
+      "owner": "cross:delivery",
+      "status": "in-progress",
+      "gate": "Build the desktop package, install it on a clean machine, then start the app and the local services from the installed launcher.",
+      "evidence": [
+        "kotlin/desktop/README.md:76",
+        "kotlin/desktop/build.gradle.kts:49"
+      ],
+      "blocks": [
+        "R.12"
+      ]
+    },
+    {
+      "id": "F.10",
+      "track": "F",
+      "title": "Accessible operation of every workflow",
+      "section": "3",
+      "stage": "M1",
+      "owner": "kotlin:desktop",
+      "status": "not-started",
+      "gate": "Complete a document edit, a note edit and a notebook answer with the keyboard alone, then read the screen-reader semantics of each step.",
+      "evidence": [],
+      "blocks": []
+    },
+    {
+      "id": "W1.01",
+      "track": "W1",
+      "title": "Document creation and outline editing",
+      "section": "4",
+      "stage": "M2",
+      "owner": "kotlin:library",
+      "status": "in-progress",
+      "gate": "Create a book, add a titled section, rename it, reorder it and reopen the book, then read back the section order.",
+      "evidence": [
+        "kotlin/library/src/main/kotlin/lmeditor/library/BookStore.kt:188",
+        "kotlin/library/src/main/kotlin/lmeditor/library/BookStore.kt:295"
+      ],
+      "blocks": []
+    },
+    {
+      "id": "W1.02",
+      "track": "W1",
+      "title": "Persistent block and run model",
+      "section": "4",
+      "stage": "M2",
+      "owner": "kotlin:word",
+      "status": "in-progress",
+      "gate": "Edit a paragraph through the document operation API, then read back the anchored runs and confirm no section string became the authority.",
+      "evidence": [
+        "kotlin/word/src/main/kotlin/lmeditor/word/WordModel.kt:671",
+        "kotlin/desktop/src/main/kotlin/lmeditor/desktop/model/DocumentWorkspace.kt:37"
+      ],
+      "blocks": [
+        "W1.01",
+        "W1.03",
+        "W1.04",
+        "W1.06",
+        "W2.01"
+      ]
+    },
+    {
+      "id": "W1.03",
+      "track": "W1",
+      "title": "Selection formatting and paragraph styles",
+      "section": "4",
+      "stage": "M2",
+      "owner": "kotlin:word",
+      "status": "not-started",
+      "gate": "Select a span in a paragraph, apply bold, a heading style and a list level, then read back the run and paragraph properties.",
+      "evidence": [],
+      "blocks": [
+        "W1.06"
+      ]
+    },
+    {
+      "id": "W1.04",
+      "track": "W1",
+      "title": "Undo, clipboard, find and statistics",
+      "section": "4",
+      "stage": "M2",
+      "owner": "cross:documents",
+      "status": "not-started",
+      "gate": "Undo and redo an edit, paste rich text, run a find and replace, then read back the document word count.",
+      "evidence": [],
+      "blocks": []
+    },
+    {
+      "id": "W1.05",
+      "track": "W1",
+      "title": "Independent human writing",
+      "section": "4",
+      "stage": "M2",
+      "owner": "cross:documents",
+      "status": "in-progress",
+      "gate": "Write a section, save it and reopen it with no provider configured, then read the run log and find no model call.",
+      "evidence": [
+        "kotlin/desktop/src/main/kotlin/lmeditor/desktop/ui/DocumentsScreen.kt:68",
+        "kotlin/desktop/src/main/kotlin/lmeditor/desktop/model/DocumentWorkspace.kt:37"
+      ],
+      "blocks": []
+    },
+    {
+      "id": "W1.06",
+      "track": "W1",
+      "title": "Edits preserve surrounding rich structure",
+      "section": "4",
+      "stage": "M2",
+      "owner": "kotlin:word",
+      "status": "not-started",
+      "gate": "Change one word in an imported rich paragraph, export the DOCX, then read back that the styles, links and anchored objects around it survived.",
+      "evidence": [],
+      "blocks": [
+        "W2.01",
+        "W3.02",
+        "W3.03"
+      ]
+    },
+    {
+      "id": "W2.01",
+      "track": "W2",
+      "title": "Real page layout and pagination",
+      "section": "4",
+      "stage": "M2",
+      "owner": "kotlin:word",
+      "status": "not-started",
+      "gate": "Lay out a 100-page document with margins, sections and page numbers, then read back the page break positions from the layout result.",
+      "evidence": [],
+      "blocks": [
+        "W2.02",
+        "W2.03",
+        "W2.05",
+        "W2.06",
+        "W2.08"
+      ]
+    },
+    {
+      "id": "W2.02",
+      "track": "W2",
+      "title": "Visual table editing",
+      "section": "4",
+      "stage": "M2",
+      "owner": "kotlin:word",
+      "status": "in-progress",
+      "gate": "Add a row and a column to a table, merge two cells and repeat the header row, then read back the resulting cell placements.",
+      "evidence": [
+        "kotlin/word/src/main/kotlin/lmeditor/word/WordTableLayout.kt:82",
+        "kotlin/word/src/main/kotlin/lmeditor/word/WordModel.kt:490"
+      ],
+      "blocks": [
+        "W2.08"
+      ]
+    },
+    {
+      "id": "W2.03",
+      "track": "W2",
+      "title": "Image insertion and placement",
+      "section": "4",
+      "stage": "M2",
+      "owner": "kotlin:word",
+      "status": "in-progress",
+      "gate": "Insert a PNG into a document with a caption and a description, export the DOCX, then read back the drawing and its extent.",
+      "evidence": [
+        "kotlin/word/src/main/kotlin/lmeditor/word/WordWriter.kt:574",
+        "kotlin/word/src/main/kotlin/lmeditor/word/WordModel.kt:291"
+      ],
+      "blocks": [
+        "W2.08"
+      ]
+    },
+    {
+      "id": "W2.04",
+      "track": "W2",
+      "title": "Links, footnotes and cross-references",
+      "section": "4",
+      "stage": "M2",
+      "owner": "kotlin:word",
+      "status": "in-progress",
+      "gate": "Author a hyperlink, a bookmark and a footnote in a document, then read them back from the exported DOCX package.",
+      "evidence": [
+        "kotlin/word/src/main/kotlin/lmeditor/word/WordReader.kt:606",
+        "kotlin/word/src/main/kotlin/lmeditor/word/WordWriter.kt:1799"
+      ],
+      "blocks": [
+        "W2.05",
+        "W2.08"
+      ]
+    },
+    {
+      "id": "W2.05",
+      "track": "W2",
+      "title": "Table of contents and bibliography",
+      "section": "4",
+      "stage": "M2",
+      "owner": "cross:documents",
+      "status": "in-progress",
+      "gate": "Insert a table of contents and a bibliography into a document, then read back the resolved citation metadata for each entry.",
+      "evidence": [
+        "kotlin/ingest/src/main/kotlin/lmeditor/ingest/BibliographyResolvers.kt:201",
+        "kotlin/ingest/src/main/kotlin/lmeditor/ingest/BibliographyResolvers.kt:505"
+      ],
+      "blocks": [
+        "W2.08"
+      ]
+    },
+    {
+      "id": "W2.06",
+      "track": "W2",
+      "title": "Print preview and PDF export",
+      "section": "4",
+      "stage": "M2",
+      "owner": "kotlin:pdf",
+      "status": "not-started",
+      "gate": "Export a laid-out document to PDF from the print preview, then reopen the PDF and read back the page count and the text of each page.",
+      "evidence": [],
+      "blocks": [
+        "W2.08",
+        "P.06"
+      ]
+    },
+    {
+      "id": "W2.07",
+      "track": "W2",
+      "title": "Spellcheck and dictionaries",
+      "section": "4",
+      "stage": "M2",
+      "owner": "python:assistant",
+      "status": "not-started",
+      "gate": "Type a misspelled word in a paragraph, then read back the dictionary suggestions and the document language setting.",
+      "evidence": [],
+      "blocks": []
+    },
+    {
+      "id": "W2.08",
+      "track": "W2",
+      "title": "DOCX feature matrix",
+      "section": "4",
+      "stage": "M2",
+      "owner": "kotlin:word",
+      "status": "not-started",
+      "gate": "Publish the DOCX feature matrix, then read one row per feature carrying read, display, edit, preserve, export and a stated limitation.",
+      "evidence": [],
+      "blocks": [
+        "R.01",
+        "R.02"
+      ]
+    },
+    {
+      "id": "W3.01",
+      "track": "W3",
+      "title": "Anchored comments and discussions",
+      "section": "4",
+      "stage": "M3",
+      "owner": "kotlin:word",
+      "status": "in-progress",
+      "gate": "Anchor a comment on a paragraph, write a reply, resolve it and reopen the DOCX, then read the thread back from the package.",
+      "evidence": [
+        "kotlin/word/src/main/kotlin/lmeditor/word/WordReader.kt:637",
+        "kotlin/word/src/main/kotlin/lmeditor/word/WordWriter.kt:1145"
+      ],
+      "blocks": [
+        "W3.03",
+        "W3.05"
+      ]
+    },
+    {
+      "id": "W3.02",
+      "track": "W3",
+      "title": "Tracked changes authoring",
+      "section": "4",
+      "stage": "M3",
+      "owner": "kotlin:word",
+      "status": "in-progress",
+      "gate": "Insert and delete text with tracking on, export the DOCX, then read back the revision elements with their author and date.",
+      "evidence": [
+        "kotlin/word/src/main/kotlin/lmeditor/word/WordReader.kt:999",
+        "kotlin/word/src/main/kotlin/lmeditor/word/WordWriter.kt:355"
+      ],
+      "blocks": [
+        "W3.03"
+      ]
+    },
+    {
+      "id": "W3.03",
+      "track": "W3",
+      "title": "Version comparison and AI edit review",
+      "section": "4",
+      "stage": "M3",
+      "owner": "kotlin:editing",
+      "status": "not-started",
+      "gate": "Compare two saved versions of a document and read the differing sections, then read a proposed AI edit back as an explicit change.",
+      "evidence": [],
+      "blocks": []
+    },
+    {
+      "id": "W3.04",
+      "track": "W3",
+      "title": "Styles, fields, forms and mail merge",
+      "section": "4",
+      "stage": "M3",
+      "owner": "kotlin:word",
+      "status": "not-started",
+      "gate": "Apply a reusable style set, insert a field and a content control, then read the definitions back from the exported DOCX.",
+      "evidence": [],
+      "blocks": []
+    },
+    {
+      "id": "W3.05",
+      "track": "W3",
+      "title": "Coauthoring, presence and permissions",
+      "section": "4",
+      "stage": "M3",
+      "owner": "cross:documents",
+      "status": "not-started",
+      "gate": "Two clients edit one document under different roles, then read the convergence record and the denied write in the server log.",
+      "evidence": [],
+      "blocks": []
+    },
+    {
+      "id": "W3.06",
+      "track": "W3",
+      "title": "Legacy doc and macro handling",
+      "section": "4",
+      "stage": "M3",
+      "owner": "kotlin:word",
+      "status": "not-started",
+      "gate": "Open a legacy .doc file, then read the compatibility note that names the macro and embedded-object limits of the import.",
+      "evidence": [],
+      "blocks": [
+        "R.01"
+      ]
+    },
+    {
+      "id": "O1.01",
+      "track": "O1",
+      "title": "Markdown source and reading modes",
+      "section": "5",
+      "stage": "M2",
+      "owner": "kotlin:vault",
+      "status": "in-progress",
+      "gate": "Open a note in source and reading modes and switch between them, then read the markdown back unchanged.",
+      "evidence": [
+        "kotlin/vault/src/main/kotlin/lmeditor/vault/Markdown.kt:102",
+        "kotlin/desktop/src/main/kotlin/lmeditor/desktop/ui/VaultScreen.kt:74"
+      ],
+      "blocks": [
+        "O1.02",
+        "O1.03"
+      ]
+    },
+    {
+      "id": "O1.02",
+      "track": "O1",
+      "title": "Safe rendering of markdown constructs",
+      "section": "5",
+      "stage": "M2",
+      "owner": "kotlin:vault",
+      "status": "not-started",
+      "gate": "Render a note holding a table, a code fence, a callout and a task list, then read back the rendered blocks and the escaped raw HTML.",
+      "evidence": [],
+      "blocks": [
+        "O1.03",
+        "O2.03"
+      ]
+    },
+    {
+      "id": "O1.03",
+      "track": "O1",
+      "title": "Wiki-link aliases and references",
+      "section": "5",
+      "stage": "M2",
+      "owner": "kotlin:vault",
+      "status": "in-progress",
+      "gate": "Follow an aliased wiki-link, a heading reference and a block reference, then read back the resolved target and the unresolved-link report.",
+      "evidence": [
+        "kotlin/vault/src/main/kotlin/lmeditor/vault/Markdown.kt:182",
+        "kotlin/vault/src/main/kotlin/lmeditor/vault/Markdown.kt:275"
+      ],
+      "blocks": [
+        "O1.07",
+        "O2.01"
+      ]
+    },
+    {
+      "id": "O1.04",
+      "track": "O1",
+      "title": "Attachments and relative links",
+      "section": "5",
+      "stage": "M2",
+      "owner": "kotlin:vault",
+      "status": "not-started",
+      "gate": "Paste an image into a note and link to a file beside it, then read back the attachment path and confirm no file moved.",
+      "evidence": [],
+      "blocks": []
+    },
+    {
+      "id": "O1.05",
+      "track": "O1",
+      "title": "Typed frontmatter properties",
+      "section": "5",
+      "stage": "M2",
+      "owner": "kotlin:vault",
+      "status": "in-progress",
+      "gate": "Write a note with typed frontmatter properties, reopen it, then read back the property values with the unknown YAML left intact.",
+      "evidence": [
+        "kotlin/vault/src/main/kotlin/lmeditor/vault/Markdown.kt:44"
+      ],
+      "blocks": [
+        "O2.03"
+      ]
+    },
+    {
+      "id": "O1.06",
+      "track": "O1",
+      "title": "Daily notes, templates and saved searches",
+      "section": "5",
+      "stage": "M2",
+      "owner": "kotlin:vault",
+      "status": "not-started",
+      "gate": "Create a daily note from a template and save a search, then reopen the vault and read both back by name.",
+      "evidence": [],
+      "blocks": []
+    },
+    {
+      "id": "O1.07",
+      "track": "O1",
+      "title": "Recoverable rename with backlink rewriting",
+      "section": "5",
+      "stage": "M2",
+      "owner": "kotlin:vault",
+      "status": "in-progress",
+      "gate": "Rename a linked note, interrupt the rename, then read back the note, its rewritten backlinks and the trash entry that restores it.",
+      "evidence": [
+        "kotlin/vault/src/main/kotlin/lmeditor/vault/VaultStore.kt:186",
+        "kotlin/vault/src/main/kotlin/lmeditor/vault/VaultStore.kt:153"
+      ],
+      "blocks": [
+        "O1.08",
+        "O2.01"
+      ]
+    },
+    {
+      "id": "O1.08",
+      "track": "O1",
+      "title": "Incremental vault index and file watching",
+      "section": "5",
+      "stage": "M2",
+      "owner": "kotlin:vault",
+      "status": "not-started",
+      "gate": "Change one note on disk, wait for the watcher, then read back the updated index entry and the vault load count for the session.",
+      "evidence": [],
+      "blocks": [
+        "O1.09",
+        "O2.01",
+        "O2.03"
+      ]
+    },
+    {
+      "id": "O1.09",
+      "track": "O1",
+      "title": "Vault search with query semantics",
+      "section": "5",
+      "stage": "M2",
+      "owner": "kotlin:vault",
+      "status": "in-progress",
+      "gate": "Run a path, tag and full-text query, then read back the ranked hits, their snippets and the filters that were applied.",
+      "evidence": [
+        "kotlin/vault/src/main/kotlin/lmeditor/vault/VaultSearch.kt:69",
+        "kotlin/vault/src/main/kotlin/lmeditor/vault/VaultSearch.kt:19"
+      ],
+      "blocks": [
+        "O2.01"
+      ]
+    },
+    {
+      "id": "O2.01",
+      "track": "O2",
+      "title": "Graph views of the vault",
+      "section": "5",
+      "stage": "M3",
+      "owner": "kotlin:vault",
+      "status": "not-started",
+      "gate": "Open the local and global graph view of a 10,000-note vault, then read back the rendered node count and the applied filters.",
+      "evidence": [],
+      "blocks": []
+    },
+    {
+      "id": "O2.02",
+      "track": "O2",
+      "title": "Canvas with portable JSON export",
+      "section": "5",
+      "stage": "M3",
+      "owner": "kotlin:vault",
+      "status": "not-started",
+      "gate": "Build a canvas of cards and connections, export it as JSON Canvas and import it back, then read the card set on both sides.",
+      "evidence": [],
+      "blocks": []
+    },
+    {
+      "id": "O2.03",
+      "track": "O2",
+      "title": "Property-driven table and card views",
+      "section": "5",
+      "stage": "M3",
+      "owner": "kotlin:vault",
+      "status": "not-started",
+      "gate": "Define a table view over a note property, then read back the rows in the same order after a restart.",
+      "evidence": [],
+      "blocks": []
+    },
+    {
+      "id": "O2.04",
+      "track": "O2",
+      "title": "Multi-device sync with offline edits",
+      "section": "5",
+      "stage": "M3",
+      "owner": "cross:notes",
+      "status": "not-started",
+      "gate": "Edit the same note offline on two devices, reconnect them, then read back the merged result with no silent data loss.",
+      "evidence": [],
+      "blocks": []
+    },
+    {
+      "id": "O2.05",
+      "track": "O2",
+      "title": "Extension and command API",
+      "section": "5",
+      "stage": "M3",
+      "owner": "cross:delivery",
+      "status": "not-started",
+      "gate": "Install a minimal extension through the declared API, then read back the permission it was granted and the commands it registered.",
+      "evidence": [],
+      "blocks": []
+    },
+    {
+      "id": "O2.06",
+      "track": "O2",
+      "title": "Publishing selected notes",
+      "section": "5",
+      "stage": "M3",
+      "owner": "kotlin:vault",
+      "status": "not-started",
+      "gate": "Publish a selected note with its attachments, then read back the published link and the private-link check that ran.",
+      "evidence": [],
+      "blocks": []
+    },
+    {
+      "id": "N1.01",
+      "track": "N1",
+      "title": "Notebook sources survive a restart",
+      "section": "6",
+      "stage": "M2",
+      "owner": "kotlin:notebooks",
+      "status": "in-progress",
+      "gate": "Ask a notebook, restart the backend and desktop, then ask again and read the explicit report of any missing or changed source.",
+      "evidence": [
+        "kotlin/server/src/main/kotlin/lmeditor/server/SourceArchive.kt:28",
+        "backend/src/lmeditor/notebooks/answer.py:91",
+        "backend/tests/test_source_persistence.py:58",
+        "backend/tests/test_notebook_routes.py:380"
+      ],
+      "blocks": [
+        "N1.02",
+        "N1.05"
+      ]
+    },
+    {
+      "id": "N1.02",
+      "track": "N1",
+      "title": "Source reader with exact locators",
+      "section": "6",
+      "stage": "M2",
+      "owner": "kotlin:text",
+      "status": "in-progress",
+      "gate": "Open a source in the reader, jump to a page and a character span, then read back the highlighted excerpt and its offsets.",
+      "evidence": [
+        "kotlin/text/src/main/kotlin/lmeditor/text/TextOffsets.kt:19",
+        "kotlin/core/src/main/kotlin/lmeditor/core/Schemas.kt:75"
+      ],
+      "blocks": []
+    },
+    {
+      "id": "N1.03",
+      "track": "N1",
+      "title": "Per-question source selection",
+      "section": "6",
+      "stage": "M2",
+      "owner": "python:notebooks",
+      "status": "in-progress",
+      "gate": "Deselect one source for a question, ask it, then read back the citations and confirm the deselected source was excluded.",
+      "evidence": [
+        "backend/src/lmeditor/notebooks/answer.py:95",
+        "kotlin/desktop/src/main/kotlin/lmeditor/desktop/ui/NotebookScreen.kt:494"
+      ],
+      "blocks": [
+        "N1.05",
+        "N1.07"
+      ]
+    },
+    {
+      "id": "N1.04",
+      "track": "N1",
+      "title": "Vault notes as explicit evidence",
+      "section": "6",
+      "stage": "M2",
+      "owner": "cross:notes",
+      "status": "not-started",
+      "gate": "Select a vault note as evidence, ask a question, then read back the note identity and the content revision each answer was bound to.",
+      "evidence": [],
+      "blocks": [
+        "N1.05"
+      ]
+    },
+    {
+      "id": "N1.05",
+      "track": "N1",
+      "title": "Persisted multi-turn conversations",
+      "section": "6",
+      "stage": "M2",
+      "owner": "python:notebooks",
+      "status": "not-started",
+      "gate": "Hold a three-turn conversation, restart the backend, then read back every turn with its sources, its citations and its feedback.",
+      "evidence": [],
+      "blocks": [
+        "N1.06",
+        "N1.07",
+        "N1.09",
+        "N2.04"
+      ]
+    },
+    {
+      "id": "N1.06",
+      "track": "N1",
+      "title": "Streamed answers with cancellation",
+      "section": "6",
+      "stage": "M2",
+      "owner": "python:notebooks",
+      "status": "in-progress",
+      "gate": "Stream an answer, cancel it mid-flight and retry, then read back the partial answer and the recorded cancellation.",
+      "evidence": [
+        "backend/src/lmeditor/server/routes.py:1050",
+        "backend/src/lmeditor/server/routes.py:2400"
+      ],
+      "blocks": []
+    },
+    {
+      "id": "N1.07",
+      "track": "N1",
+      "title": "Claim-level evidence evaluation",
+      "section": "6",
+      "stage": "M2",
+      "owner": "python:verification",
+      "status": "in-progress",
+      "gate": "Ask a question whose answer carries one supported and one unsupported claim, then read back the per-claim verdict for each.",
+      "evidence": [
+        "backend/src/lmeditor/notebooks/answer.py:131",
+        "backend/src/lmeditor/verification/claim_extractor.py:58"
+      ],
+      "blocks": [
+        "N1.08",
+        "N1.09",
+        "P.05"
+      ]
+    },
+    {
+      "id": "N1.08",
+      "track": "N1",
+      "title": "Separation of relevance, identity and support",
+      "section": "6",
+      "stage": "M2",
+      "owner": "python:verification",
+      "status": "in-progress",
+      "gate": "Evaluate an answer, then read back the retrieval rank, the exact citation identity and the semantic support score as separate fields.",
+      "evidence": [
+        "backend/src/lmeditor/verification/nli_evaluator.py:220",
+        "kotlin/text/src/main/kotlin/lmeditor/text/ClaimLineage.kt:40"
+      ],
+      "blocks": [
+        "N1.09"
+      ]
+    },
+    {
+      "id": "N1.09",
+      "track": "N1",
+      "title": "Contradiction handling and abstention",
+      "section": "6",
+      "stage": "M2",
+      "owner": "python:notebooks",
+      "status": "in-progress",
+      "gate": "Ask a question two sources contradict and one they cannot answer, then read back the contradiction report and the refusal.",
+      "evidence": [
+        "backend/src/lmeditor/notebooks/answer.py:54",
+        "backend/src/lmeditor/notebooks/answer.py:167"
+      ],
+      "blocks": []
+    },
+    {
+      "id": "N1.10",
+      "track": "N1",
+      "title": "Persisted retrieval index and recall benchmark",
+      "section": "6",
+      "stage": "M2",
+      "owner": "python:provenance",
+      "status": "not-started",
+      "gate": "Persist a retrieval index across a restart, then read back the recall and the citation-precision figures for the curated corpus.",
+      "evidence": [],
+      "blocks": [
+        "N1.08"
+      ]
+    },
+    {
+      "id": "N2.01",
+      "track": "N2",
+      "title": "Expanded ingestion coverage",
+      "section": "6",
+      "stage": "M3",
+      "owner": "kotlin:ingest",
+      "status": "in-progress",
+      "gate": "Ingest a PDF, a DOCX, an HTML page, a Markdown file and a pasted text, then read back the extraction quality and the omissions for each.",
+      "evidence": [
+        "kotlin/ingest/src/main/kotlin/lmeditor/ingest/LoaderRegistry.kt:23",
+        "kotlin/pdf/src/main/kotlin/lmeditor/pdf/PdfText.kt:27"
+      ],
+      "blocks": [
+        "N2.02",
+        "N2.03"
+      ]
+    },
+    {
+      "id": "N2.02",
+      "track": "N2",
+      "title": "Audio and video ingestion",
+      "section": "6",
+      "stage": "M3",
+      "owner": "kotlin:ingest",
+      "status": "not-started",
+      "gate": "Ingest an audio file and a video transcript, then read back the timestamped transcript and the original reference for each.",
+      "evidence": [],
+      "blocks": []
+    },
+    {
+      "id": "N2.03",
+      "track": "N2",
+      "title": "Web discovery and document connectors",
+      "section": "6",
+      "stage": "M3",
+      "owner": "kotlin:ingest",
+      "status": "in-progress",
+      "gate": "Resolve a DOI through the resolver chain, then read back the captured version so a refresh cannot alter an old answer.",
+      "evidence": [
+        "kotlin/ingest/src/main/kotlin/lmeditor/ingest/BibliographyResolvers.kt:505",
+        "kotlin/ingest/src/main/kotlin/lmeditor/ingest/UrlPolicy.kt:315"
+      ],
+      "blocks": []
+    },
+    {
+      "id": "N2.04",
+      "track": "N2",
+      "title": "Editable summaries and briefing documents",
+      "section": "6",
+      "stage": "M3",
+      "owner": "python:drafting",
+      "status": "in-progress",
+      "gate": "Draft a section from a notebook's sources, edit the draft and save it, then read back the draft and its evidence links.",
+      "evidence": [
+        "backend/src/lmeditor/drafting/modules.py:33",
+        "backend/src/lmeditor/drafting/modules.py:278"
+      ],
+      "blocks": [
+        "N2.05",
+        "N2.06",
+        "N2.08"
+      ]
+    },
+    {
+      "id": "N2.05",
+      "track": "N2",
+      "title": "Flashcards, quizzes and study progress",
+      "section": "6",
+      "stage": "M3",
+      "owner": "python:drafting",
+      "status": "not-started",
+      "gate": "Generate a flashcard set and a quiz from a notebook, then read back each answer key checked against its evidence.",
+      "evidence": [],
+      "blocks": []
+    },
+    {
+      "id": "N2.06",
+      "track": "N2",
+      "title": "Audio overviews",
+      "section": "6",
+      "stage": "M3",
+      "owner": "python:assistant",
+      "status": "not-started",
+      "gate": "Generate an audio overview with its source-linked script, play it and download it, then read back the script and its references.",
+      "evidence": [],
+      "blocks": []
+    },
+    {
+      "id": "N2.07",
+      "track": "N2",
+      "title": "Video overviews and slide decks",
+      "section": "6",
+      "stage": "M3",
+      "owner": "python:assistant",
+      "status": "not-started",
+      "gate": "Generate a slide deck from a notebook, then reopen it and read back the script, the references and the generation settings.",
+      "evidence": [],
+      "blocks": []
+    },
+    {
+      "id": "N2.08",
+      "track": "N2",
+      "title": "Persisted artifact jobs and versions",
+      "section": "6",
+      "stage": "M3",
+      "owner": "kotlin:notebooks",
+      "status": "not-started",
+      "gate": "Generate a study pack, restart the backend and reopen it, then read back its provenance, its version and its export.",
+      "evidence": [],
+      "blocks": [
+        "N2.09",
+        "P.06"
+      ]
+    },
+    {
+      "id": "N2.09",
+      "track": "N2",
+      "title": "Notebook sharing with roles",
+      "section": "6",
+      "stage": "M3",
+      "owner": "kotlin:server",
+      "status": "not-started",
+      "gate": "Share a notebook with a reader role, then attempt a source download and read back the denial and the revocation.",
+      "evidence": [],
+      "blocks": []
+    },
+    {
+      "id": "N2.10",
+      "track": "N2",
+      "title": "Provider usage, cost and privacy",
+      "section": "6",
+      "stage": "M3",
+      "owner": "python:llm",
+      "status": "not-started",
+      "gate": "Start an operation that calls a remote provider, then read back the usage, the estimated cost and the privacy choice shown before it ran.",
+      "evidence": [],
+      "blocks": []
+    },
+    {
+      "id": "P.01",
+      "track": "P",
+      "title": "Shared project workspace manifest",
+      "section": "7",
+      "stage": "M2",
+      "owner": "kotlin:core",
+      "status": "not-started",
+      "gate": "Open one project that holds a document, a note, a notebook and a source, then read back the stable id each entry is linked by.",
+      "evidence": [],
+      "blocks": [
+        "P.02",
+        "P.03",
+        "P.04",
+        "P.05",
+        "P.06"
+      ]
+    },
+    {
+      "id": "P.02",
+      "track": "P",
+      "title": "Promote a cited passage into a note",
+      "section": "7",
+      "stage": "M2",
+      "owner": "cross:notes",
+      "status": "not-started",
+      "gate": "Promote a quoted passage into a vault note, then read back the note's locator, the source id and the source revision it carries.",
+      "evidence": [],
+      "blocks": [
+        "P.03"
+      ]
+    },
+    {
+      "id": "P.03",
+      "track": "P",
+      "title": "Promote research into an editable document",
+      "section": "7",
+      "stage": "M2",
+      "owner": "cross:research",
+      "status": "in-progress",
+      "gate": "Build an outline from a notebook's notes, open it as a book, edit a section, then read back the provenance each section kept.",
+      "evidence": [
+        "kotlin/discovery/src/main/kotlin/lmeditor/discovery/OutlineBuilder.kt:45",
+        "backend/src/lmeditor/library/importer.py:102"
+      ],
+      "blocks": [
+        "P.05"
+      ]
+    },
+    {
+      "id": "P.04",
+      "track": "P",
+      "title": "Add a document to notebook research",
+      "section": "7",
+      "stage": "M2",
+      "owner": "cross:research",
+      "status": "not-started",
+      "gate": "Add a document section to a notebook, then read back the manifest entry that says whether it is a snapshot or a live link.",
+      "evidence": [],
+      "blocks": []
+    },
+    {
+      "id": "P.05",
+      "track": "P",
+      "title": "Navigate from claim to evidence",
+      "section": "7",
+      "stage": "M2",
+      "owner": "python:verification",
+      "status": "in-progress",
+      "gate": "Open a manuscript claim, jump to the chunk that supports it and back, then read the stale flag after the claim was edited.",
+      "evidence": [
+        "backend/src/lmeditor/verification/citation_checker.py:270",
+        "kotlin/text/src/main/kotlin/lmeditor/text/ClaimLineage.kt:40"
+      ],
+      "blocks": []
+    },
+    {
+      "id": "P.06",
+      "track": "P",
+      "title": "Portable project bundle export and import",
+      "section": "7",
+      "stage": "M3",
+      "owner": "python:export",
+      "status": "not-started",
+      "gate": "Export a project bundle, import it on a clean installation, then read back the notes, documents, originals, artifacts and manifest it carried.",
+      "evidence": [],
+      "blocks": [
+        "R.04"
+      ]
+    },
+    {
+      "id": "R.01",
+      "track": "R",
+      "title": "Compatibility corpus",
+      "section": "10",
+      "stage": "M4",
+      "owner": "cross:evidence",
+      "status": "in-progress",
+      "gate": "Run the corpus over edited and untouched round trips, then read back the manifest entry that names each fixture and its outcome.",
+      "evidence": [
+        "backend/tests/word_fixtures.py:209",
+        "backend/tests/word_shared_corpus.py:211"
+      ],
+      "blocks": [
+        "R.02",
+        "R.05"
+      ]
+    },
+    {
+      "id": "R.02",
+      "track": "R",
+      "title": "Export comparison against real Word",
+      "section": "10",
+      "stage": "M4",
+      "owner": "cross:evidence",
+      "status": "evidence-partial",
+      "gate": "Export a document, compare its semantic structure and rendered pages with the fixtures, then read back the Word validation result.",
+      "evidence": [
+        "backend/tests/word_real_word_check.py:555",
+        "backend/tests/test_word_real_word.py:31"
+      ],
+      "blocks": []
+    },
+    {
+      "id": "R.03",
+      "track": "R",
+      "title": "Fault injection and recovery",
+      "section": "10",
+      "stage": "M4",
+      "owner": "cross:evidence",
+      "status": "not-started",
+      "gate": "Fill the disk, deny a write and kill the process mid-save, then read back the acknowledged edit and the recoverable conflict.",
+      "evidence": [],
+      "blocks": []
+    },
+    {
+      "id": "R.04",
+      "track": "R",
+      "title": "Reversibility and clean-installation restore",
+      "section": "10",
+      "stage": "M4",
+      "owner": "cross:delivery",
+      "status": "not-started",
+      "gate": "Import a project bundle on a clean installation, restore a backup, then read back the documents, notes and sources that came back.",
+      "evidence": [],
+      "blocks": []
+    },
+    {
+      "id": "R.05",
+      "track": "R",
+      "title": "Measured latency and memory budgets",
+      "section": "10",
+      "stage": "M4",
+      "owner": "cross:evidence",
+      "status": "not-started",
+      "gate": "Benchmark the 100-page document, the 10,000-note vault and the 100-source notebook, then read back the measured p95 latency and the memory.",
+      "evidence": [],
+      "blocks": [
+        "R.06"
+      ]
+    },
+    {
+      "id": "R.06",
+      "track": "R",
+      "title": "Latency separation and UI responsiveness",
+      "section": "10",
+      "stage": "M4",
+      "owner": "cross:evidence",
+      "status": "not-started",
+      "gate": "Run a long job while editing and navigating, then read back the local-interaction latency measured apart from the model latency.",
+      "evidence": [],
+      "blocks": []
+    },
+    {
+      "id": "R.07",
+      "track": "R",
+      "title": "Boundary limits and input sanitisation",
+      "section": "10",
+      "stage": "M4",
+      "owner": "kotlin:ingest",
+      "status": "in-progress",
+      "gate": "Submit an oversized upload, a private-host URL and a path that escapes the root, then read back the refusal for each.",
+      "evidence": [
+        "kotlin/ingest/src/main/kotlin/lmeditor/ingest/Limits.kt:22",
+        "kotlin/ingest/src/main/kotlin/lmeditor/ingest/UrlPolicy.kt:315",
+        "backend/tests/test_ingestion_security.py:9"
+      ],
+      "blocks": []
+    },
+    {
+      "id": "R.08",
+      "track": "R",
+      "title": "Authenticated local gateway",
+      "section": "10",
+      "stage": "M4",
+      "owner": "kotlin:server",
+      "status": "in-progress",
+      "gate": "Call the gateway from a foreign origin and read back the refusal of the mutation, then call it without the installation credential and read back the refusal of that request too: the origin half is implemented, the installation credential is not.",
+      "evidence": [
+        "backend/src/lmeditor/server/app.py:130",
+        "backend/src/lmeditor/server/app.py:146",
+        "backend/src/lmeditor/server/app.py:230",
+        "backend/src/lmeditor/server/app.py:460",
+        "backend/src/lmeditor/server/app.py:464"
+      ],
+      "blocks": [
+        "R.12",
+        "N2.09"
+      ]
+    },
+    {
+      "id": "R.09",
+      "track": "R",
+      "title": "Secrets in protected storage",
+      "section": "10",
+      "stage": "M4",
+      "owner": "python:llm",
+      "status": "not-started",
+      "gate": "Configure a provider key, read the diagnostics dump, then read back that no key and no document content appears in it.",
+      "evidence": [],
+      "blocks": []
+    },
+    {
+      "id": "R.10",
+      "track": "R",
+      "title": "Access checks on retrieval and export",
+      "section": "10",
+      "stage": "M4",
+      "owner": "kotlin:server",
+      "status": "in-progress",
+      "gate": "Revoke a source, then request retrieval, an artifact export and a source download, then read back the refusal and the preserved history.",
+      "evidence": [
+        "backend/src/lmeditor/notebooks/answer.py:95",
+        "backend/src/lmeditor/server/sources.py:161"
+      ],
+      "blocks": []
+    },
+    {
+      "id": "R.11",
+      "track": "R",
+      "title": "Reproducible diagnostics and repair",
+      "section": "10",
+      "stage": "M4",
+      "owner": "cross:delivery",
+      "status": "not-started",
+      "gate": "Run the diagnostics action, read back the storage and index status, then rebuild the index and read back the rebuilt state.",
+      "evidence": [],
+      "blocks": []
+    },
+    {
+      "id": "R.12",
+      "track": "R",
+      "title": "Platform installation validation",
+      "section": "10",
+      "stage": "M4",
+      "owner": "cross:delivery",
+      "status": "not-started",
+      "gate": "Install, launch, edit offline, restart the service, upgrade and uninstall on a supported platform, then read back the retained data.",
+      "evidence": [],
+      "blocks": []
+    }
+  ]
+}

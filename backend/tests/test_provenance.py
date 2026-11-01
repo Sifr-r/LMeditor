@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import pytest
 
+from lmeditor.core.citations import iter_citation_spans
 from lmeditor.core.exceptions import (
     ChunkNotFoundError,
     CitationHallucinationError,
@@ -13,14 +14,22 @@ from lmeditor.core.exceptions import (
 from lmeditor.core.schemas import SourceChunk
 from lmeditor.core.types import DenseEmbedderProtocol
 from lmeditor.provenance.chunker import (
+    SentenceAwareChunker,
     SemanticChunker,
     SlidingWindowChunker,
+    SourceChunker,
     compute_chunk_id,
+    estimate_token_count,
     get_byte_offsets,
+)
+from lmeditor.provenance.embeddings import (
+    SEMANTIC_MODEL_NAME,
+    SentenceTransformerEmbedder,
 )
 from lmeditor.provenance.indexer import (
     BM25Index,
     DenseVectorIndex,
+    FALLBACK_EMBEDDER_NAME,
     HybridIndexer,
 )
 from lmeditor.provenance.lineage import (
@@ -225,7 +234,12 @@ class MockEmbedder(DenseEmbedderProtocol):
 
 
 def test_dense_vector_index_with_fallback_and_custom_embedder() -> None:
-    """Verify DenseVectorIndex fallback vectorizer and custom embedder support."""
+    """Verify DenseVectorIndex fallback vectorizer and custom embedder support.
+
+    The fallback has to be asked for explicitly: the index now prefers a real
+    sentence-transformers model and only falls back to the deterministic hash
+    when no model can be loaded (and says which one it is using).
+    """
     chunker = SlidingWindowChunker(window_size=100, overlap_size=20)
     chunks = chunker.chunk(
         "Verifiable source citations prevent hallucinated claims in generated drafts.",
@@ -233,7 +247,7 @@ def test_dense_vector_index_with_fallback_and_custom_embedder() -> None:
     )
 
     # 1. Fallback vectorizer (no external dependencies)
-    fallback_index = DenseVectorIndex()
+    fallback_index = DenseVectorIndex(enable_semantic=False)
     fallback_index.index(chunks)
     res = fallback_index.search("verifiable citations", top_k=2)
     assert len(res) == len(chunks)
@@ -296,6 +310,44 @@ def test_hybrid_indexer_rrf_fusion() -> None:
 # ============================================================================
 # 7. CitationLineageEngine Tests
 # ============================================================================
+
+
+def test_attributing_a_span_to_an_unrelated_passage_reports_no_confidence() -> None:
+    """A passage that shares nothing with the span supports it not at all.
+
+    The client renders the lineage's confidence as the passage's "Fidelity" to
+    the claim, so a constant floor would tell the reader that a passage which
+    supports nothing supports the claim halfway. The confidence is the
+    measured overlap, so a passage with no overlap reports none.
+    """
+    engine = CitationLineageEngine()
+
+    source_text = "Coral reefs shelter a quarter of all marine species and their larvae."
+    chunk = SourceChunk.create(
+        document_id="doc_src",
+        text=source_text,
+        char_start=0,
+        char_end=len(source_text),
+        byte_start=0,
+        byte_end=len(source_text.encode("utf-8")),
+    )
+    chunk_store = {chunk.chunk_id: chunk}
+
+    draft_text = "Mangrove forests slow storm surge along tropical coasts."
+
+    lineage = engine.attribute_span(
+        draft_text=draft_text,
+        span_start=0,
+        span_end=len(draft_text),
+        cited_chunk_id=chunk.chunk_id,
+        claim_id="claim_002",
+        chunk_store=chunk_store,
+    )
+
+    assert lineage.exact_quote is None
+    assert lineage.confidence_score == 0.0, (
+        "a passage with no shared wording must report no confidence"
+    )
 
 
 def test_citation_lineage_attribute_span_and_hallucination_guard() -> None:
@@ -415,3 +467,225 @@ def test_citation_lineage_extract_citations_from_draft() -> None:
     assert citations[1].chunk_id == cid2
     assert citations[0].span_start > 0
     assert citations[0].span_end > citations[0].span_start
+
+
+
+def _chunk(chunk_id: str, text: str = "Source text") -> SourceChunk:
+    """A source chunk with a known id."""
+    return SourceChunk(
+        chunk_id=chunk_id,
+        document_id="doc1",
+        text=text,
+        char_start=0,
+        char_end=len(text),
+        byte_start=0,
+        byte_end=len(text),
+    )
+
+
+def _chunk_id(label: str) -> str:
+    """A realistic chunk id: the deterministic digest the chunker produces.
+
+    ``SourceChunk`` constrains ``chunk_id`` to a 64-character lower-case hex
+    digest, so a test chunk can only ever carry an id of that shape.
+    """
+    return compute_chunk_id("doc1", 0, len(label), label)
+
+
+def test_a_citation_group_yields_one_record_per_cited_chunk() -> None:
+    """A marker group cites several chunks, and each gets its own record.
+
+    The engine used to carry its own regex, which accepted exactly one
+    64-character hex id per bracket. A group such as ``[#a, #b]`` was
+    dropped here in its entirety, even though the verifier checks such a
+    group chunk by chunk and the manuscript bridge writes one footnote per
+    chunk in it: the section carried no lineage while its footnotes were
+    written.
+    """
+    engine = CitationLineageEngine()
+    first = _chunk_id("first")
+    second = _chunk_id("second")
+    store = {first: _chunk(first), second: _chunk(second)}
+
+    citations = engine.extract_citations_from_draft(
+        f"A claim [#{first}, #{second}].", store
+    )
+
+    assert [citation.chunk_id for citation in citations] == [first, second]
+    # Both records point at the same marker.
+    assert citations[0].span_start == citations[1].span_start
+    assert citations[0].span_end == citations[1].span_end
+
+
+def test_the_lineage_engine_finds_exactly_what_the_canonical_grammar_finds() -> None:
+    """The engine and the canonical grammar never disagree about a citation.
+
+    ``lmeditor.core.citations`` is the single source of truth for the
+    marker grammar: the drafting side writes it, the verifier reads it and
+    the manuscript bridge consumes it. If the lineage engine disagreed, a
+    section could cite a chunk the verifier never checked.
+    """
+    engine = CitationLineageEngine()
+    alpha = _chunk_id("alpha")
+    beta = _chunk_id("beta")
+    gamma = _chunk_id("gamma")
+    delta = _chunk_id("delta")
+    draft = (
+        f"A claim [#{alpha}]. Another [#{beta}, #{gamma}]. "
+        f"A link [text](https://example.org). A bare [{delta}] "
+        "and a picture ![alt](image.png)."
+    )
+    store = {
+        chunk_id: _chunk(chunk_id)
+        for chunk_id in (alpha, beta, gamma, delta)
+    }
+
+    found = engine.extract_citations_from_draft(draft, store)
+    canonical = [
+        chunk_id
+        for chunk_id, _start, _end in iter_citation_spans(draft)
+        if chunk_id in store
+    ]
+
+    assert [citation.chunk_id for citation in found] == canonical
+    # Pinned so the comparison above cannot pass vacuously.
+    assert canonical == [alpha, beta, gamma, delta]
+    # The markdown link and the image are not citations.
+    assert "text" not in canonical
+    assert "alt" not in canonical
+
+
+def test_a_citation_to_a_chunk_that_is_not_in_the_store_is_not_recorded() -> None:
+    """Only chunks that are actually in the store produce a lineage record."""
+    engine = CitationLineageEngine()
+    known = _chunk_id("known")
+    unknown = _chunk_id("unknown")
+    store = {known: _chunk(known)}
+
+    citations = engine.extract_citations_from_draft(
+        f"Grounded [#{known}] but ungrounded [#{unknown}].", store
+    )
+
+    assert [citation.chunk_id for citation in citations] == [known]
+
+
+def test_an_upper_case_chunk_id_resolves_to_its_stored_form() -> None:
+    """A marker may spell the id in upper case; the store holds lower case."""
+    engine = CitationLineageEngine()
+    chunk_id = _chunk_id("upper")
+    store = {chunk_id: _chunk(chunk_id)}
+
+    citations = engine.extract_citations_from_draft(
+        f"A claim [#{chunk_id.upper()}].", store
+    )
+
+    assert [citation.chunk_id for citation in citations] == [chunk_id]
+
+
+# ============================================================================
+# 8. Semantic embeddings, token estimates and source-aware chunking
+# ============================================================================
+
+
+def test_the_dense_index_names_the_fallback_embedder() -> None:
+    """The index says which embedder it is using, so a degradation is visible."""
+    index = DenseVectorIndex(enable_semantic=False)
+    assert index.embedder_name == FALLBACK_EMBEDDER_NAME
+
+
+def test_a_model_that_cannot_be_loaded_is_reported_as_the_fallback() -> None:
+    """A model that is not on disk degrades to the hash, and says so."""
+    chunker = SlidingWindowChunker(window_size=100, overlap_size=20)
+    chunks = chunker.chunk("A passage about grounding.", document_id="doc_embed")
+
+    index = DenseVectorIndex(semantic_model="not-a-real-model-for-tests")
+    index.index(chunks)
+
+    assert index.embedder_name == FALLBACK_EMBEDDER_NAME
+    assert index.search("grounding", top_k=1)
+
+
+def test_the_semantic_model_is_used_when_it_is_available() -> None:
+    """A real sentence-transformers model is used when the cache has it."""
+    embedder = SentenceTransformerEmbedder(SEMANTIC_MODEL_NAME)
+    if not embedder.is_available():
+        pytest.skip("the sentence-transformers model is not in the local cache")
+
+    chunker = SlidingWindowChunker(window_size=100, overlap_size=20)
+    chunks = chunker.chunk("A passage about grounding.", document_id="doc_embed")
+
+    index = DenseVectorIndex()
+    index.index(chunks)
+
+    assert index.embedder_name == SEMANTIC_MODEL_NAME
+
+
+def test_the_hybrid_indexer_reports_its_embedder() -> None:
+    """The hybrid index names the embedder its dense half uses."""
+    hybrid = HybridIndexer(vector_index=DenseVectorIndex(enable_semantic=False))
+    assert hybrid.embedder_name == FALLBACK_EMBEDDER_NAME
+
+
+def test_a_chunk_carries_a_token_estimate() -> None:
+    """A chunk reports a token estimate instead of the default zero."""
+    chunker = SentenceAwareChunker(chunk_size=200, overlap_size=20)
+    text = "A sentence with a handful of words in it. Another sentence follows it."
+    chunks = chunker.chunk(text=text, document_id="doc_tokens")
+
+    assert chunks
+    for chunk in chunks:
+        assert chunk.token_count > 0
+        assert chunk.token_count == estimate_token_count(chunk.text)
+
+
+def test_the_token_estimate_is_documented_as_an_estimate() -> None:
+    """The estimate is a character-based approximation, not a tokenizer count."""
+    assert estimate_token_count("") == 0
+    assert estimate_token_count("four") == 1
+    assert estimate_token_count("x" * 400) == 100
+
+
+def test_the_source_chunker_never_cuts_a_sentence_in_half() -> None:
+    """The chunks are whole sentences, not fragments of them."""
+    sentences = [
+        f"Sentence number {index} carries a little weight." for index in range(1, 9)
+    ]
+    text = " ".join(sentences)
+
+    chunker = SentenceAwareChunker(chunk_size=60, overlap_size=0)
+    chunks = chunker.chunk(text=text, document_id="doc_sentences")
+
+    assert chunks
+    for chunk in chunks:
+        assert chunk.text.strip() in sentences
+
+
+def test_the_overlap_repeats_whole_sentences() -> None:
+    """The repeated text between two chunks is a sentence, not a fragment."""
+    sentences = [
+        f"Sentence number {index} carries a little weight." for index in range(1, 9)
+    ]
+    text = " ".join(sentences)
+
+    chunker = SentenceAwareChunker(chunk_size=60, overlap_size=35)
+    chunks = chunker.chunk(text=text, document_id="doc_overlap")
+
+    assert len(chunks) > 1
+    for chunk in chunks:
+        for sentence in sentences:
+            if sentence in chunk.text:
+                # A sentence that appears must appear whole.
+                assert chunk.text.count(sentence) == 1
+
+
+def test_the_source_chunker_alias_points_at_the_source_aware_chunker() -> None:
+    """The old name no longer promises more than the chunker delivers."""
+    assert SourceChunker is SentenceAwareChunker
+
+
+def test_the_source_aware_chunker_rejects_an_impossible_window() -> None:
+    """The window and overlap are validated as the other chunkers validate them."""
+    with pytest.raises(ValueError):
+        SentenceAwareChunker(chunk_size=0)
+    with pytest.raises(ValueError):
+        SentenceAwareChunker(chunk_size=100, overlap_size=100)

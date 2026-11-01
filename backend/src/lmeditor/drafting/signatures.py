@@ -31,6 +31,28 @@ class SectionDraftingSignature(dspy.Signature):
     )
 
 
+class NotebookAnswerSignature(dspy.Signature):
+    """Answer a question from the passages alone.
+
+    Answer only from the passages given: nothing outside them may be used, however
+    relevant it looks. Put an inline [#<chunk_id>] tag on every factual statement,
+    naming the passage it came from. When the passages do not answer the question,
+    say so plainly instead of inventing an answer.
+    """
+
+    question: str = dspy.InputField(desc="The question the notebook is asked")
+    assigned_chunks_text: str = dspy.InputField(
+        desc="The notebook's own passages, prefixed by their hexadecimal chunk IDs"
+    )
+
+    answer: str = dspy.OutputField(
+        desc="The answer, with an inline citation tag [#<chunk_id>] on every factual statement"
+    )
+    cited_chunk_ids: list[str] = dspy.OutputField(
+        desc="List of unique chunk IDs cited in the generated answer"
+    )
+
+
 class CitationInsertionSignature(dspy.Signature):
     """Anchor an ungrounded or draft sentence to supporting source passages.
 
@@ -64,5 +86,6 @@ class MacroCohesionSignature(dspy.Signature):
 __all__ = [
     "CitationInsertionSignature",
     "MacroCohesionSignature",
+    "NotebookAnswerSignature",
     "SectionDraftingSignature",
 ]

@@ -1,5 +1,7 @@
 # LMeditor — Gap Analysis & Change Proposals
 
+> **Superseded in part — 2026-10-25.** This is a dated analysis of the codebase as it stood. The Flutter/Dart desktop client it assumes was **removed**; the Kotlin tier (`kotlin/`) now holds the deterministic rules and the Compose client (`kotlin/desktop/`) provides the document pipeline UI. Proposals naming Dart components must be reassessed against that client and the HTTP contract — `EventType`, the SSE envelope and the routes. The historical findings below describe their original scope. See `ARCHITECTURE.md` §§19–20 for the removal, replacement and remaining UI gaps.
+
 > Date: 2026-09-21 (revised)
 > Scope: Codebase as it exists in `D:/LMeditor` (`backend/src/lmeditor/...`, `client/lib/...`, `ARCHITECTURE.md`)
 > Purpose: Identify competing/adjacent apps in the grounded long-form writing space, map their feature surfaces, and propose the changes LMeditor would need to close the gaps.
@@ -8,7 +10,7 @@
 
 ## 1. What LMeditor actually is (today)
 
-LMeditor is an **enterprise-grade grounded long-form writing harness**. Its thesis: produce a long manuscript whose every factual claim is anchored to a verifiable source chunk, with NLI-based verification and HITL gates — running as a native Flutter Desktop client over a FastAPI/LangGraph backend.
+LMeditor is an **enterprise-grade grounded long-form writing harness**. Its thesis: produce a long manuscript whose every factual claim is anchored to a verifiable source chunk, with NLI-based verification and HITL gates — served over a FastAPI/LangGraph backend. *(As of 2026-10-25 the Kotlin Compose desktop client consumes the HTTP surface for the document pipeline. See `ARCHITECTURE.md` §20.)*
 
 **In code today** (`backend/src/lmeditor/`):
 
@@ -29,7 +31,7 @@ LMeditor is an **enterprise-grade grounded long-form writing harness**. Its thes
 | `workflow/graph.py` | ✅ Done (ephemeral state) | The compiled graph uses `MemorySaver()` by default (line 74). Server restart = lost HITL state. |
 | `workflow/nodes.py`, `edges.py`, `state.py` | ✅ Done | Linear LangGraph with cyclic refinement edges. |
 | `server/app.py`, `routes.py`, `session.py` | ✅ Done | FastAPI + SSE gateway. **In-memory `session_manager`.** The only ingest endpoint (`POST /api/v1/documents/generate`) accepts pre-built `SourceChunk` objects — no PDF/DOCX/URL parsing anywhere in `lmeditor.*`. |
-| `client/lib/...` (Flutter) | ✅ Done | Riverpod state, Canvas-based chip renderer, HITL modal, side-by-side verification pane. |
+| `client/lib/...` (Flutter) | ✅ Done → **removed 2026-10-25** | Riverpod state, Canvas-based chip renderer, HITL modal, side-by-side verification pane. The files are gone; the server contract they consumed is unchanged and is enforced between the two tiers by `backend/tests/test_wire_contract.py`. |
 | `pyproject.toml` deps | `pydantic`, `dspy-ai`, `langgraph`, `llama-index`, `sentence-transformers`, `fastapi`, `uvicorn`, `numpy`. **No `spacy`, no `pypdf`, no `python-docx`, no `playwright`/`trafilatura`.** |
 
 **Tests** (`backend/tests/`): 6 suites, 68 KB total. **No tests for ingestion, retrieval-from-graph, or export** — those modules don't exist.

@@ -1,5 +1,11 @@
 """LMeditor core module exports."""
 
+from lmeditor.core.citations import (
+    CITATION_PATTERN,
+    extract_chunk_ids,
+    iter_citation_spans,
+    strip_citations,
+)
 from lmeditor.core.exceptions import (
     ChunkNotFoundError,
     CitationHallucinationError,
@@ -7,17 +13,26 @@ from lmeditor.core.exceptions import (
     DialogueError,
     DSPyAssertionError,
     InvalidStateTransitionError,
+    IncompleteOperationError,
     LMeditorError,
     NLIModelError,
+    NoVaultOpenError,
     OutlineGenerationError,
     PassageBoundsError,
     PerspectiveGenerationError,
     ProvenanceError,
+    RevisionConflictError,
     SpanAlignmentError,
     StateGraphDeadlockError,
+    StorageWriteError,
     UngroundedClaimError,
     ValidationError,
+    VaultError,
+    VaultNotFoundError,
     VerificationError,
+    WordParseError,
+    WordProcessingError,
+    WordRenderError,
     WorkflowDeadlockError,
     WorkflowError,
 )
@@ -58,6 +73,11 @@ from lmeditor.core.types import (
 )
 
 __all__ = [
+    # Citation grammar
+    "CITATION_PATTERN",
+    "extract_chunk_ids",
+    "iter_citation_spans",
+    "strip_citations",
     # Exceptions
     "ChunkNotFoundError",
     "CitationHallucinationError",
@@ -65,17 +85,26 @@ __all__ = [
     "DialogueError",
     "DSPyAssertionError",
     "InvalidStateTransitionError",
+    "IncompleteOperationError",
     "LMeditorError",
     "NLIModelError",
+    "NoVaultOpenError",
     "OutlineGenerationError",
     "PassageBoundsError",
     "PerspectiveGenerationError",
     "ProvenanceError",
+    "RevisionConflictError",
     "SpanAlignmentError",
     "StateGraphDeadlockError",
+    "StorageWriteError",
     "UngroundedClaimError",
     "ValidationError",
+    "VaultError",
+    "VaultNotFoundError",
     "VerificationError",
+    "WordParseError",
+    "WordProcessingError",
+    "WordRenderError",
     "WorkflowDeadlockError",
     "WorkflowError",
     # Schemas

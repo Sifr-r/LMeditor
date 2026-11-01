@@ -1,0 +1,126 @@
+# The shared whitespace and format corpus.
+#
+# One file, read by both tiers: the Kotlin test reads it as a classpath
+# resource and the Python test reads it by path. The expected values are
+# Python's answers -- Python is the yardstick -- and they are written by
+# `backend/scripts/generate_word_shared_corpus.py`, never by hand.
+#
+# One record per line, tab-separated. The first field names the kind:
+#   normalize  name  input  expected
+#   join       name  separator  fragments  expected
+#   strip      name  input  expected
+#   format     name  bytes-hex  is_legacy_doc  is_zip_package  description
+#
+# A text field is ASCII: a tab is \t, a line feed is \n, a carriage return
+# is \r, a backslash is \\, a pipe is \|, a code point inside the Basic
+# Multilingual Plane is \uXXXX and one above it is \UXXXXXXXX. The
+# fragments of a join record are separated by a pipe.
+#
+# A blank line is ignored and a line that starts with # is a comment.
+normalize	whitespace-U+0009	a\tb	a b
+normalize	whitespace-U+000A	a\nb	a b
+normalize	whitespace-U+000B	a\u000Bb	a b
+normalize	whitespace-U+000C	a\u000Cb	a b
+normalize	whitespace-U+000D	a\rb	a b
+normalize	whitespace-U+001C	a\u001Cb	a b
+normalize	whitespace-U+001D	a\u001Db	a b
+normalize	whitespace-U+001E	a\u001Eb	a b
+normalize	whitespace-U+001F	a\u001Fb	a b
+normalize	whitespace-U+0020	a b	a b
+normalize	whitespace-U+0085	a\u0085b	a b
+normalize	whitespace-U+00A0	a\u00A0b	a b
+normalize	whitespace-U+1680	a\u1680b	a b
+normalize	whitespace-U+2000	a\u2000b	a b
+normalize	whitespace-U+2001	a\u2001b	a b
+normalize	whitespace-U+2002	a\u2002b	a b
+normalize	whitespace-U+2003	a\u2003b	a b
+normalize	whitespace-U+2004	a\u2004b	a b
+normalize	whitespace-U+2005	a\u2005b	a b
+normalize	whitespace-U+2006	a\u2006b	a b
+normalize	whitespace-U+2007	a\u2007b	a b
+normalize	whitespace-U+2008	a\u2008b	a b
+normalize	whitespace-U+2009	a\u2009b	a b
+normalize	whitespace-U+200A	a\u200Ab	a b
+normalize	whitespace-U+2028	a\u2028b	a b
+normalize	whitespace-U+2029	a\u2029b	a b
+normalize	whitespace-U+202F	a\u202Fb	a b
+normalize	whitespace-U+205F	a\u205Fb	a b
+normalize	whitespace-U+3000	a\u3000b	a b
+normalize	empty		
+normalize	a-single-space	 	
+normalize	leading-and-trailing	  leading and trailing  	leading and trailing
+normalize	nel-between-words	abc\u0085def	abc def
+normalize	nel-only	\u0085	
+normalize	nel-leading	\u0085abc	abc
+normalize	nel-trailing	abc\u0085	abc
+normalize	nel-run	a\u0085\u0085b	a b
+normalize	nel-around-spaces	a \u0085 b	a b
+normalize	carriage-return-and-line-feed	a\r\nb	a b
+normalize	quad-through-hair-space	a\u2000b\u2001c\u2002d\u2003e\u2004f\u2005g\u2006h\u2007i\u2008j\u2009k\u200Al	a b c d e f g h i j k l
+normalize	line-and-paragraph-separator	a\u2028b\u2029c	a b c
+normalize	every-replaced-space	a\u00A0\u2007\u202F\u2009\u200B\u00AD\u3000b	a b
+normalize	astral-character	a\U0001F600b	a\U0001F600b
+normalize	combining-mark	e\u0301	e\u0301
+normalize	control-character	a\u0007b	a\u0007b
+normalize	mixed-whitespace	  a\u00A0\tb\u0085  	a b
+normalize	ordinary-text	Grounded claim.	Grounded claim.
+join	nothing	 		
+join	default-separator	 	a|b	a b
+join	empty-fragments-dropped	 	first||second	first second
+join	only-empty-fragments	 	|	
+join	custom-separator	 \| 	a|b	a \| b
+join	pipe-separator	\|	a|b	a\|b
+join	tab-separator-collapses	\t	a|b	a b
+join	empty-separator		a|b	ab
+join	normalises-the-parts	 	  first | second  	first second
+join	nel-in-a-fragment	 	a\u0085b|c	a b c
+join	a-fragment-with-a-pipe	 	a\|b|c	a\|b c
+strip	control-U+0000	a\u0000b	ab
+strip	control-U+0001	a\u0001b	ab
+strip	control-U+0002	a\u0002b	ab
+strip	control-U+0003	a\u0003b	ab
+strip	control-U+0004	a\u0004b	ab
+strip	control-U+0005	a\u0005b	ab
+strip	control-U+0006	a\u0006b	ab
+strip	control-U+0007	a\u0007b	ab
+strip	control-U+0008	a\u0008b	ab
+strip	control-U+0009	a\tb	a\tb
+strip	control-U+000A	a\nb	a\nb
+strip	control-U+000B	a\u000Bb	ab
+strip	control-U+000C	a\u000Cb	ab
+strip	control-U+000D	a\rb	a\rb
+strip	control-U+000E	a\u000Eb	ab
+strip	control-U+000F	a\u000Fb	ab
+strip	control-U+0010	a\u0010b	ab
+strip	control-U+0011	a\u0011b	ab
+strip	control-U+0012	a\u0012b	ab
+strip	control-U+0013	a\u0013b	ab
+strip	control-U+0014	a\u0014b	ab
+strip	control-U+0015	a\u0015b	ab
+strip	control-U+0016	a\u0016b	ab
+strip	control-U+0017	a\u0017b	ab
+strip	control-U+0018	a\u0018b	ab
+strip	control-U+0019	a\u0019b	ab
+strip	control-U+001A	a\u001Ab	ab
+strip	control-U+001B	a\u001Bb	ab
+strip	control-U+001C	a\u001Cb	ab
+strip	control-U+001D	a\u001Db	ab
+strip	control-U+001E	a\u001Eb	ab
+strip	control-U+001F	a\u001Fb	ab
+strip	empty		
+strip	a-bell	a\u0007b	ab
+strip	tabs-and-newlines-kept	a\tb\nc\rd	a\tb\nc\rd
+strip	every-control-removed	\u0000\u0001\u0002\u001F	
+strip	nel-kept	a\u0085b	a\u0085b
+strip	no-break-space-kept	a\u00A0b	a\u00A0b
+strip	astral-character-kept	a\U0001F600b	a\U0001F600b
+strip	combining-mark-kept	e\u0301	e\u0301
+strip	ordinary-text-kept	Grounded claim.	Grounded claim.
+format	ole2-magic	d0cf11e0a1b11ae1	true	false	legacy .doc (OLE2) is not supported; convert to .docx
+format	ole2-magic-with-a-tail	d0cf11e0a1b11ae1ff00	true	false	legacy .doc (OLE2) is not supported; convert to .docx
+format	zip-magic	504b0304	false	true	the file is not a valid .docx package (bad zip container)
+format	zip-magic-with-a-tail	504b030414000000	false	true	the file is not a valid .docx package (bad zip container)
+format	truncated-ole2-magic	d0cf11e0	false	false	the file is neither an OOXML (.docx) package nor a legacy .doc document
+format	truncated-zip-magic	504b03	false	false	the file is neither an OOXML (.docx) package nor a legacy .doc document
+format	neither	48656c6c6f	false	false	the file is neither an OOXML (.docx) package nor a legacy .doc document
+format	empty		false	false	the file is neither an OOXML (.docx) package nor a legacy .doc document

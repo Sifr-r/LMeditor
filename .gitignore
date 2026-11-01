@@ -14,14 +14,13 @@ venv/
 .coverage
 htmlcov/
 
-# Flutter / Dart
-.dart_tool/
-.flutter-plugins
-.flutter-plugins-dependencies
-.packages
-.pub-cache/
-.pub/
-build/
+# Editor / OS
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# Editor workspaces
 .idea/
 .vscode/
 *.iml
@@ -30,13 +29,15 @@ build/
 # SDD plan workspaces (git-ignored scratch per superpowers:subagent-driven-development)
 .superpowers/sdd/
 
-# Editor / OS
-.DS_Store
-Thumbs.db
-*.swp
-*.swo
+# Toolchain caches fetched locally (Gradle distribution, Maven/Gradle caches)
+.tools/
+.kotlin/
+kotlin/.gradle/
 
 # Local config
 .env
 .env.local
 *.local
+
+# Local source archive (originals/metadata must not enter source control)
+backend/.lmeditor/

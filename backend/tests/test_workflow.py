@@ -205,6 +205,7 @@ def test_ingest_endpoint_accepts_text_file() -> None:
     import httpx
 
     from lmeditor.server.app import create_app
+    from lmeditor.server.sources import source_library
 
     app = create_app()
     transport = httpx.ASGITransport(app=app)
@@ -232,6 +233,11 @@ def test_ingest_endpoint_accepts_text_file() -> None:
         assert isinstance(body["chunks"], list)
         assert len(body["chunks"]) >= 1
 
-    asyncio.run(run())
-
-    path.unlink()
+    try:
+        asyncio.run(run())
+    finally:
+        # The library is the server's memory of what it ingested, and the tier
+        # keeps one registry for the whole process: this test leaves it as it
+        # found it, and it does so whether the assertions passed or not.
+        path.unlink(missing_ok=True)
+        source_library.clear()

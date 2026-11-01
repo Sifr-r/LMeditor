@@ -1,11 +1,23 @@
-"""Comprehensive test suite for LMeditor source ingestion loaders."""
+"""Comprehensive test suite for LMeditor source ingestion loaders.
+
+The URL loader's own rules -- the fetch, the redirect discipline, the peer
+check and the size cap -- live in the Kotlin tier now, and the tier's own
+tests prove them there
+(``kotlin/ingest/src/test/kotlin/lmeditor/ingest/LoadersTest.kt`` and
+``HttpSafetyTest.kt``). A Python test can no longer stub the transport: the
+request is issued in the JVM.
+
+What this file covers is the *door*: the per-kind loaders read a file on disk
+into normalised text, and they report a failure as the domain error their
+callers catch.
+"""
 
 from __future__ import annotations
 
+import sys
 import tempfile
 from pathlib import Path
 
-import httpx
 import pytest
 
 from lmeditor.core.exceptions import SourceLoadError
@@ -15,7 +27,6 @@ from lmeditor.ingestion.loaders import (
     MarkdownSourceLoader,
     PdfSourceLoader,
     TextSourceLoader,
-    UrlSourceLoader,
 )
 
 
@@ -169,42 +180,64 @@ def test_docx_loader_reads_text() -> None:
 
 
 # ============================================================================
-# 6. UrlSourceLoader Tests (Task 9)
+# 6. Resource limits, omissions, metadata and sizes
 # ============================================================================
 
 
-def test_url_loader_fetches_and_extracts_text(monkeypatch) -> None:
-    captured: dict[str, object] = {}
+def test_docx_loader_surfaces_the_omission_register(tmp_path) -> None:
+    """The DOCX loader reports the content the reader could not preserve."""
+    sys.path.insert(0, str(Path(__file__).parent))
+    try:
+        from word_fixtures import build_image_document_package
+    finally:
+        sys.path.pop(0)
 
-    def fake_get(url, **kwargs):
-        captured["url"] = url
-        captured["follow_redirects"] = kwargs.get("follow_redirects")
-        request = httpx.Request("GET", url)
-        return httpx.Response(
-            200,
-            content=b"<html><body><h1>Fetched</h1><p>Body.</p></body></html>",
-            request=request,
-        )
+    package = tmp_path / "with-image.docx"
+    package.write_bytes(build_image_document_package())
 
-    monkeypatch.setattr(httpx, "get", fake_get)
+    loader = DocxSourceLoader()
+    loaded = loader.load_detailed(package)
 
-    loader = UrlSourceLoader()
-    text, page_count = loader.load("https://example.org/paper")
-
-    assert "Fetched" in text
-    assert "Body." in text
-    assert page_count is None
-    assert captured["url"] == "https://example.org/paper"
-    assert captured["follow_redirects"] is True
+    assert loaded.omissions, "the omission register must not be dropped"
+    assert any("image" in omission for omission in loaded.omissions)
+    assert "Before the figure." in loaded.text
 
 
-def test_url_loader_raises_on_http_error(monkeypatch) -> None:
-    def fake_get(url, **kwargs):
-        request = httpx.Request("GET", url)
-        return httpx.Response(404, request=request)
+def test_pdf_loader_extracts_the_document_metadata(tmp_path) -> None:
+    """The PDF loader reports the /Info metadata, including the DOI."""
+    from pypdf import PdfWriter
 
-    monkeypatch.setattr(httpx, "get", fake_get)
+    writer = PdfWriter()
+    writer.add_blank_page(width=200, height=200)
+    writer.add_metadata(
+        {
+            "/Title": "A Verifiable Writing Harness",
+            "/Author": "Jane Doe",
+            "/Subject": "doi:10.1234/harness",
+            "/Keywords": "provenance, retrieval",
+        }
+    )
+    pdf_path = tmp_path / "paper.pdf"
+    with pdf_path.open("wb") as handle:
+        writer.write(handle)
 
-    loader = UrlSourceLoader()
-    with pytest.raises(SourceLoadError, match="Failed to load url source"):
-        loader.load("https://example.org/missing")
+    loader = PdfSourceLoader()
+    loaded = loader.load_detailed(pdf_path)
+
+    assert loaded.pdf_metadata["title"] == "A Verifiable Writing Harness"
+    assert loaded.pdf_metadata["author"] == "Jane Doe"
+    assert loaded.pdf_metadata["subject"] == "doi:10.1234/harness"
+    assert loaded.pdf_metadata["doi"] == "10.1234/harness"
+
+
+def test_loaders_report_the_size_of_the_artifact(tmp_path) -> None:
+    """A loader reports the real size of the file it read."""
+    text_path = tmp_path / "note.txt"
+    content = b"a small document"
+    text_path.write_bytes(content)
+
+    loaded = TextSourceLoader().load_detailed(text_path)
+
+    assert loaded.byte_size == len(content)
+
+

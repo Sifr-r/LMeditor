@@ -11,13 +11,17 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from lmeditor.core.types import (
     BibliographyResolverKind,
     DocumentStatus,
+    EditScope,
     EntailmentStatus,
     EventType,
+    EvidenceSource,
+    FactCheckVerdict,
     OutlineNodeType,
     PerspectiveRole,
     SectionStatus,
     SourceKind,
     WorkflowStep,
+    WorkingSetRole,
 )
 
 
@@ -169,6 +173,32 @@ class BibliographicRecord(BaseModel):
             )
         return self
 
+    def to_wire(self) -> dict[str, Any]:
+        """The record's wire form.
+
+        This is the counterpart of ``kotlin/core/WireDecode.kt``'s
+        ``bibliographicRecordFromWire``: the same keys, the same names and the
+        same enum wire string, so the record can cross the NDJSON seam and be
+        read back by the tier without a translation layer.
+
+        Every key is always present.  An optional field travels as ``null``,
+        which the decoder reads exactly like an absent key.
+        """
+        return {
+            "title": self.title,
+            "authors": list(self.authors),
+            "year": self.year,
+            "publication_date": self.publication_date,
+            "container_title": self.container_title,
+            "volume": self.volume,
+            "issue": self.issue,
+            "pages": self.pages,
+            "doi": self.doi,
+            "url": self.url,
+            "type": self.type,
+            "resolver": self.resolver.value,
+        }
+
 
 class Source(BaseModel):
     """A user-supplied artifact (file or URL) plus its resolved bibliographic record."""
@@ -205,6 +235,10 @@ class Source(BaseModel):
         default_factory=lambda: datetime.now(timezone.utc),
         description="UTC timestamp at which the source was added",
     )
+    omissions: list[str] = Field(
+        default_factory=list,
+        description="Content the loader could not preserve (images, comments, endnotes, ...)",
+    )
 
 
 class SourceIngestResult(BaseModel):
@@ -214,6 +248,10 @@ class SourceIngestResult(BaseModel):
 
     source: Source
     chunks: list[SourceChunk]
+    omissions: list[str] = Field(
+        default_factory=list,
+        description="Content the loader could not preserve, surfaced to the operator",
+    )
 
 
 class Claim(BaseModel):
@@ -268,6 +306,31 @@ class Claim(BaseModel):
                 )
         return self
 
+    def to_wire(self) -> dict[str, Any]:
+        """The claim's wire form.
+
+        The counterpart of ``kotlin/core/WireDecode.kt``'s ``claimFromWire``:
+        the same keys, the same names and the same enum wire string, so the
+        claim can cross the NDJSON seam and be read back by the tier without a
+        translation layer.
+
+        Every key is always present.  An optional field travels as ``null``,
+        which the decoder reads exactly like an absent key.
+        """
+        return {
+            "claim_id": self.claim_id,
+            "section_id": self.section_id,
+            "text": self.text,
+            "char_start": self.char_start,
+            "char_end": self.char_end,
+            "cited_chunk_ids": list(self.cited_chunk_ids),
+            "entailment_status": self.entailment_status.value,
+            "entailment_score": self.entailment_score,
+            "reasoning": self.reasoning,
+            "sentence_idx": self.sentence_idx,
+            "premise_text": self.premise_text,
+        }
+
 
 class CitationLineage(BaseModel):
     """Fine-grained token-span attribution binding a claim to an exact source passage."""
@@ -301,6 +364,28 @@ class CitationLineage(BaseModel):
                 f"span_end ({self.span_end}) must be greater than span_start ({self.span_start})"
             )
         return self
+
+    def to_wire(self) -> dict[str, Any]:
+        """The lineage's wire form.
+
+        The counterpart of ``kotlin/core/WireDecode.kt``'s
+        ``citationLineageFromWire``: the same keys, the same names and the same
+        defaults, so the lineage can cross the NDJSON seam and be read back by
+        the tier without a translation layer.
+
+        Every key is always present.  The timestamp travels as an ISO-8601
+        string, the way ``kotlin/word/WIRE.md`` §1.1 spells a timestamp.
+        """
+        return {
+            "lineage_id": self.lineage_id,
+            "claim_id": self.claim_id,
+            "chunk_id": self.chunk_id,
+            "span_start": self.span_start,
+            "span_end": self.span_end,
+            "exact_quote": self.exact_quote,
+            "confidence_score": self.confidence_score,
+            "created_at": self.created_at.isoformat(),
+        }
 
 
 class InlineCitation(BaseModel):
@@ -451,6 +536,29 @@ class OutlineNode(BaseModel):
         return leaves
 
 
+class OutlineNodeInput(BaseModel):
+    """One section of a caller-supplied outline.
+
+    A caller-supplied outline is the operator's steer: the sections they name
+    are the sections the manuscript is written to. It carries no chunk
+    assignments and no ids, because the server assigns the passages — the
+    operator says *what* the document should cover, and the corpus decides
+    *what may be said* about it.
+    """
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    title: str = Field(min_length=1, description="Section heading the draft is written to")
+    description: str = Field(default="", description="What this section should cover")
+    children: list["OutlineNodeInput"] = Field(
+        default_factory=list,
+        description="Nested sections under this one",
+    )
+
+
+OutlineNodeInput.model_rebuild()
+
+
 class SectionDraft(BaseModel):
     """Complete draft content for an outline section with associated claims and citations."""
 
@@ -490,6 +598,31 @@ class SectionDraft(BaseModel):
         description="Explicit list of chunk IDs cited in content",
     )
 
+    def to_wire(self) -> dict[str, Any]:
+        """The section's wire form.
+
+        The counterpart of ``kotlin/core/WireDecode.kt``'s ``sectionDraftFromWire``:
+        the same keys, the same names, the same defaults and the same enum wire
+        string, so the section can cross the NDJSON seam and be read back by the
+        tier without a translation layer.
+
+        Every key is always present.  An optional field travels as ``null``,
+        which the decoder reads exactly like an absent key.
+        """
+        return {
+            "section_id": self.section_id,
+            "title": self.title,
+            "content": self.content,
+            "order": self.order,
+            "citations": [citation.to_wire() for citation in self.citations],
+            "claims": [claim.to_wire() for claim in self.claims],
+            "is_verified": self.is_verified,
+            "status": self.status.value,
+            "revision_count": self.revision_count,
+            "critique": self.critique,
+            "cited_chunk_ids": list(self.cited_chunk_ids),
+        }
+
 
 class VerificationReport(BaseModel):
     """Formal audit scorecard summarizing claim verification outcomes for a section or document."""
@@ -511,6 +644,10 @@ class VerificationReport(BaseModel):
     status: EntailmentStatus = Field(description="Aggregate entailment status")
     all_passed: bool = Field(description="True if zero contradictions or ungrounded claims exist")
     summary: str = Field(description="Human-readable synthesis of verification findings")
+    evaluator: str = Field(
+        default="",
+        description="Which NLI evaluator produced these verdicts (e.g. 'cross-encoder/nli-deberta-v3-small')",
+    )
 
     @property
     def f_beta(self) -> float:
@@ -543,18 +680,83 @@ class VerificationScorecard(BaseModel):
     contradicted_claims: int = Field(ge=0, description="Claims with CONTRADICTED status")
     neutral_claims: int = Field(ge=0, description="Claims with NEUTRAL status")
     details: list[Claim] = Field(default_factory=list, description="Claim-by-claim evaluation records")
+    evaluator: str = Field(
+        default="",
+        description="Which NLI evaluator produced these verdicts; 'heuristic' means the cross-encoder was unavailable",
+    )
 
 
 class HITLReviewPayload(BaseModel):
-    """Human-in-the-loop review decision payload."""
+    """Human-in-the-loop review decision payload.
+
+    ``doc_id`` names the document the decision is about and is a **path**
+    parameter of the route that takes this body, so it is optional here and the
+    path is authoritative: a body that names a different document cannot
+    redirect a decision to another run.  The route fills it in.
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid", str_strip_whitespace=True)
 
-    doc_id: str = Field(description="Document identifier")
+    doc_id: str = Field(
+        default="",
+        description=(
+            "Document the decision is about; the path is authoritative and the "
+            "route fills this in"
+        ),
+    )
     approved: bool = Field(description="Whether manuscript was approved by human operator")
     feedback: Optional[str] = Field(default=None, description="Human critique or guidance for redrafting")
     modified_sections: Optional[list[SectionDraft]] = Field(
         default=None, description="Optional manual edits submitted by human"
+    )
+
+
+class SectionSaveRequest(BaseModel):
+    """The operator's own text for one section of a document.
+
+    This is what a word processor's "save" carries: the text the operator left
+    on the page. It is deliberately narrower than ``SectionDraft`` — the
+    operator supplies the *content*, and the server keeps the provenance the
+    pipeline established for that section. A citation the pipeline verified
+    still says where its passage came from after the operator has reworded the
+    sentence around it, so discarding it would lose the audit trail the whole
+    application exists to maintain.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    content: str = Field(description="The section's markdown, as the operator left it")
+    title: Optional[str] = Field(
+        default=None,
+        min_length=1,
+        description="A new heading for the section; the current one is kept when absent",
+    )
+    order: Optional[int] = Field(
+        default=None,
+        ge=0,
+        description="A new position in the document; the current one is kept when absent",
+    )
+
+
+class SectionSaveResult(BaseModel):
+    """What the server stored for one section, and what it measured on it.
+
+    The status and the scorecard are the honest account of the saved text.
+    A section the operator rewrote is not thereby verified: it is approved by
+    the person who wrote it, and the grounding measured on it is reported
+    separately so the two are never confused.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    section_id: str = Field(description="The section that was saved")
+    title: str = Field(description="The section's heading, as it now stands")
+    content: str = Field(description="The text that was stored")
+    status: SectionStatus = Field(description="The section's lifecycle status after the save")
+    is_verified: bool = Field(description="Whether the saved text was measured and passed")
+    scorecard: Optional[VerificationScorecard] = Field(
+        default=None,
+        description="The grounding measured on the saved text, when it could be measured",
     )
 
 
@@ -646,6 +848,315 @@ class DocumentDraft(BaseModel):
     sections: list[SectionDraft] = Field(default_factory=list, description="Manuscript sections")
     status: DocumentStatus = Field(default=DocumentStatus.DRAFTING, description="Document lifecycle status")
 
+    def to_wire(self) -> dict[str, Any]:
+        """The draft's wire form.
+
+        The counterpart of ``kotlin/core/WireDecode.kt``'s ``documentDraftFromWire``:
+        the same keys, the same names and the same enum wire string, so the
+        draft can cross the NDJSON seam and be read back by the tier without a
+        translation layer.
+
+        Every key is always present.
+        """
+        return {
+            "document_id": self.document_id,
+            "title": self.title,
+            "sections": [section.to_wire() for section in self.sections],
+            "status": self.status.value,
+        }
+
+
+class InlineEditRequest(BaseModel):
+    """A targeted edit to one paragraph or section of a manuscript.
+
+    This is the small-edit contract: the caller names a section, points at
+    the text to change, and says what the change should achieve. The
+    revision is grounded in the document's own sources, and the edit is
+    rejected rather than applied when the revision cannot be supported.
+
+    ``doc_id`` names the document being edited and is a **path** parameter of
+    the route that takes this body, so it is optional here and the path is
+    authoritative: a body that names a different document cannot redirect the
+    edit.  The route fills it in before the request reaches the domain.
+    """
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    doc_id: str = Field(
+        default="",
+        description=(
+            "Identifier of the manuscript being edited; the path is "
+            "authoritative and the route fills this in"
+        ),
+    )
+    section_id: str = Field(min_length=1, description="Identifier of the section being edited")
+    instruction: str = Field(
+        min_length=1,
+        description="What the edit should achieve, stated in plain language",
+    )
+    selected_text: str = Field(
+        default="",
+        description="The exact text the user selected, when the edit targets a selection",
+    )
+    scope: EditScope = Field(
+        default=EditScope.PARAGRAPH,
+        description="Whether the instruction applies to one paragraph or the whole section",
+    )
+    paragraph_index: int = Field(
+        default=0,
+        ge=0,
+        description="Zero-based index of the paragraph within the section",
+    )
+    persist: bool = Field(
+        default=True,
+        description="Whether the accepted revision is written back to the document",
+    )
+
+
+class InlineEditResult(BaseModel):
+    """The outcome of a targeted edit."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid", str_strip_whitespace=True)
+
+    doc_id: str = Field(min_length=1)
+    section_id: str = Field(min_length=1)
+    scope: EditScope = Field(default=EditScope.PARAGRAPH)
+    original_text: str = Field(default="", description="The text before the edit")
+    revised_text: str = Field(default="", description="The proposed text after the edit")
+    applied: bool = Field(
+        default=False,
+        description="True when the revision was accepted and persisted",
+    )
+    reason: str = Field(default="", description="Why the revision was accepted or rejected")
+    cited_chunk_ids: list[str] = Field(
+        default_factory=list,
+        description="Source chunks the revision relies on",
+    )
+    claims: list[Claim] = Field(default_factory=list, description="Claims in the revised text")
+    scorecard: Optional[VerificationScorecard] = Field(
+        default=None,
+        description="Verification scorecard for the revised text",
+    )
+    section: Optional[SectionDraft] = Field(
+        default=None,
+        description="The section after the edit, when the edit was persisted",
+    )
+
+
+class Evidence(BaseModel):
+    """A single piece of evidence used to judge a claim."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid", str_strip_whitespace=True)
+
+    source: EvidenceSource = Field(description="Whether the evidence came from the corpus or the web")
+    chunk_id: str = Field(default="", description="Corpus chunk identifier, when the source is the corpus")
+    url: str = Field(default="", description="Web address, when the source is the web")
+    title: str = Field(default="", description="Human-readable title of the evidence")
+    excerpt: str = Field(default="", description="The passage that supports or refutes the claim")
+    score: float = Field(default=0.0, ge=0.0, le=1.0, description="Relevance of the evidence to the claim")
+
+
+class ClaimVerdict(BaseModel):
+    """The verdict on one claim together with the evidence behind it."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid", str_strip_whitespace=True)
+
+    claim_id: str = Field(min_length=1)
+    claim_text: str = Field(default="")
+    status: EntailmentStatus = Field(description="Entailment status of the claim against its evidence")
+    score: float = Field(default=0.0, ge=0.0, le=1.0, description="Confidence in the verdict")
+    evidence: list[Evidence] = Field(default_factory=list, description="Evidence considered for this claim")
+    reasoning: str = Field(default="", description="Why this verdict was reached")
+
+
+class FactCheckRequest(BaseModel):
+    """A request to fact-check a passage against the corpus, the web, or both.
+
+    ``doc_id`` names the document whose sources provide the evidence and is a
+    **path** parameter of the route that takes this body, so it is optional
+    here and the path is authoritative: a body that names a different document
+    cannot redirect the check.  The route fills it in.
+    """
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    doc_id: str = Field(
+        default="",
+        description=(
+            "Document whose sources provide the evidence; the path is "
+            "authoritative and the route fills this in"
+        ),
+    )
+    text: str = Field(min_length=1, description="The passage to fact-check")
+    section_id: str = Field(default="", description="Section the passage belongs to, when known")
+    include_web: bool = Field(
+        default=False,
+        description="Whether the open web should also be consulted",
+    )
+    max_evidence: int = Field(
+        default=5,
+        ge=1,
+        le=25,
+        description="Maximum number of evidence items retrieved per claim",
+    )
+
+
+class FactCheckReport(BaseModel):
+    """The result of fact-checking a passage."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid", str_strip_whitespace=True)
+
+    doc_id: str = Field(min_length=1)
+    text: str = Field(default="", description="The passage that was checked")
+    verdict: FactCheckVerdict = Field(
+        default=FactCheckVerdict.INCONCLUSIVE,
+        description="Aggregate verdict over every claim in the passage",
+    )
+    claims: list[ClaimVerdict] = Field(default_factory=list, description="Per-claim verdicts")
+    scorecard: Optional[VerificationScorecard] = Field(
+        default=None,
+        description="Verification scorecard for the passage",
+    )
+    web_searched: bool = Field(
+        default=False,
+        description="Whether the web was consulted for this check",
+    )
+    summary: str = Field(default="", description="Human-readable synthesis of the findings")
+
+
+class BookSection(BaseModel):
+    """One section of a book, stored and edited in isolation."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid", str_strip_whitespace=True)
+
+    section_id: str = Field(min_length=1)
+    title: str = Field(default="")
+    order: int = Field(default=0, ge=0, description="Position of the section in the book")
+    word_count: int = Field(default=0, ge=0)
+    char_count: int = Field(default=0, ge=0)
+    chunk_ids: list[str] = Field(default_factory=list, description="Corpus chunks indexed for this section")
+
+
+class BookManifest(BaseModel):
+    """The index of a book: enough to navigate it without loading it.
+
+    The manifest holds metadata and a section index, never the body text of
+    the book. That is what lets a book of any size be opened, navigated and
+    edited one section at a time.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid", str_strip_whitespace=True)
+
+    book_id: str = Field(min_length=1)
+    title: str = Field(default="")
+    section_count: int = Field(default=0, ge=0)
+    chunk_count: int = Field(default=0, ge=0)
+    created_at: datetime
+    modified_at: datetime
+    sections: list[BookSection] = Field(default_factory=list, description="The section index")
+    brief: str = Field(
+        default="",
+        description="Bounded running digest of what the book contains so far",
+    )
+
+
+class WorkingSetSection(BaseModel):
+    """A section as it appears inside a bounded working set."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid", str_strip_whitespace=True)
+
+    section_id: str = Field(min_length=1)
+    title: str = Field(default="")
+    order: int = Field(default=0, ge=0)
+    role: WorkingSetRole = Field(default=WorkingSetRole.TARGET)
+    content: str = Field(default="", description="The section text, present only for loaded sections")
+
+
+class WorkingSet(BaseModel):
+    """The bounded context used to edit one section of a book.
+
+    A working set is the whole of the book that the language model ever
+    sees: the target section, its immediate neighbours, the passages that
+    retrieval considers relevant, and the running brief. Everything else
+    stays on disk.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid", str_strip_whitespace=True)
+
+    book_id: str = Field(min_length=1)
+    target_section_id: str = Field(min_length=1)
+    sections: list[WorkingSetSection] = Field(default_factory=list)
+    passages: list[SourceChunk] = Field(default_factory=list)
+    brief: str = Field(default="")
+    context_chars: int = Field(default=0, ge=0, description="Total size of the working set in characters")
+
+
+class BookSectionEditRequest(BaseModel):
+    """A request to edit one section of a book in place.
+
+    ``book_id`` and ``section_id`` name the book and the section and are
+    **path** parameters of the route that takes this body, so they are
+    optional here and the path is authoritative: a body that names a
+    different book cannot redirect the edit.  The route fills them in.
+    """
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    book_id: str = Field(
+        default="",
+        description=(
+            "Book the section belongs to; the path is authoritative and the "
+            "route fills this in"
+        ),
+    )
+    section_id: str = Field(
+        default="",
+        description=(
+            "Section being edited; the path is authoritative and the route "
+            "fills this in"
+        ),
+    )
+    instruction: str = Field(min_length=1, description="What the edit should achieve")
+    selected_text: str = Field(default="", description="The exact text the user selected")
+    scope: EditScope = Field(default=EditScope.PARAGRAPH)
+    paragraph_index: int = Field(default=0, ge=0)
+    persist: bool = Field(default=True, description="Whether the accepted revision is written back")
+
+
+class BookSectionSaveRequest(BaseModel):
+    """The operator's own text for one section of a book.
+
+    A book is edited one section at a time, and the operator's own hand has to
+    be able to do that editing. The instruction-based edit asks the machine to
+    rewrite; this carries what the operator wrote themselves.
+
+    The whitespace is deliberately not stripped: the text is the operator's,
+    and a word processor stores what was typed.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    content: str = Field(description="The section's markdown, as the operator left it")
+
+
+class BookSectionSaveResult(BaseModel):
+    """What the server stored for one section of a book.
+
+    ``chunk_count`` is how many passages the section is now indexed as. The
+    section's text changed, so its passages changed with it, and the operator
+    is told the new number rather than left to guess whether the index caught
+    up.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    section_id: str = Field(description="The section that was saved")
+    title: str = Field(default="", description="The section's heading")
+    content: str = Field(default="", description="The text that was stored")
+    word_count: int = Field(default=0, ge=0, description="Words in the stored text")
+    char_count: int = Field(default=0, ge=0, description="Characters in the stored text")
+    chunk_count: int = Field(default=0, ge=0, description="Passages the section is now indexed as")
+
 
 __all__ = [
     "SourceChunk",
@@ -657,6 +1168,7 @@ __all__ = [
     "DialogueSession",
     "ResearchMemory",
     "OutlineNode",
+    "OutlineNodeInput",
     "TopicOutline",
     "SectionDraft",
     "DocumentDraft",
@@ -665,5 +1177,18 @@ __all__ = [
     "VerificationScorecard",
     "HITLReviewPayload",
     "WorkflowEvent",
+    "InlineEditRequest",
+    "InlineEditResult",
+    "Evidence",
+    "ClaimVerdict",
+    "FactCheckRequest",
+    "FactCheckReport",
+    "BookSection",
+    "BookManifest",
+    "WorkingSetSection",
+    "WorkingSet",
+    "BookSectionEditRequest",
+    "BookSectionSaveRequest",
+    "BookSectionSaveResult",
 ]
 

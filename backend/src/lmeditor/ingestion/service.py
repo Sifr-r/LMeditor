@@ -1,8 +1,28 @@
-"""High-level ingestion orchestration: load → resolve bibliography → chunk → return."""
+"""High-level ingestion orchestration: load -> resolve bibliography -> chunk -> return.
+
+The pipeline behind one source is deterministic, and all of it is the Kotlin
+tier's: the loader that reads the artifact, the resolver chain that finds its
+bibliographic record, and the chunker that cuts the text into passages. This
+module is the *door* onto that pipeline. It keeps the Python API its callers
+already use -- the constructor, the factory and the ``ingest`` signature --
+and answers with the tier's answers.
+
+The original implementation is frozen in
+:mod:`lmeditor._reference.ingestion_service`.
+
+No parity check compares the two sides yet: the pipeline ends in a chunked
+result that carries the resolver's answer with it, so a comparison would need
+one frozen corpus of sources and one shared answer for each. The gap is
+declared rather than silent: the ledger ``REFERENCE_WITNESSES`` in
+``backend/scripts/verify_kotlin_parity.py`` names this module against its
+Kotlin counterpart
+(``kotlin/ingest/src/main/kotlin/lmeditor/ingest/IngestionService.kt``) and
+the harness fails if that declaration stops matching the tree.
+"""
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Any, Optional
 
 from lmeditor.core.schemas import (
     BibliographicRecord,
@@ -13,7 +33,8 @@ from lmeditor.core.schemas import (
 from lmeditor.core.types import SourceKind
 from lmeditor.ingestion.registry import SourceLoaderRegistry
 from lmeditor.ingestion.resolvers import BibliographyResolverChain
-from lmeditor.provenance.chunker import SourceChunker
+from lmeditor.provenance.chunker import SentenceAwareChunker
+from lmeditor.tier import ingest as tier_ingest
 
 
 class IngestionService:
@@ -23,7 +44,7 @@ class IngestionService:
         self,
         registry: SourceLoaderRegistry,
         resolvers: BibliographyResolverChain,
-        chunker: SourceChunker,
+        chunker: SentenceAwareChunker,
     ) -> None:
         self._registry = registry
         self._resolvers = resolvers
@@ -34,7 +55,7 @@ class IngestionService:
         return cls(
             registry=SourceLoaderRegistry.default(),
             resolvers=BibliographyResolverChain.default(),
-            chunker=SourceChunker(chunk_size=120, overlap_size=25),
+            chunker=SentenceAwareChunker(chunk_size=120, overlap_size=25),
         )
 
     def ingest(
@@ -50,34 +71,21 @@ class IngestionService:
         pdf_metadata: Optional[dict[str, object]] = None,
         byte_size: Optional[int] = None,
     ) -> SourceIngestResult:
-        text, page_count = self._registry.load(kind, origin)
+        """Ingest one source and return the source and the chunks it was cut into.
 
-        # Build bibliography record via resolver chain.
-        bibliography: Optional[BibliographicRecord] = None
-        if any([doi, arxiv_id, pmid, pdf_metadata]):
-            bibliography = self._resolvers.resolve(
-                source_id=source_id,
-                source_kind=kind,
-                doi=doi,
-                arxiv_id=arxiv_id,
-                pmid=pmid,
-                pdf_metadata=pdf_metadata,
-            )
-
-        source = Source(
-            id=source_id,
+        The loader's own metadata wins over nothing, and an explicitly
+        supplied one wins over the loader's: the caller knows more than the
+        document does. Both the merge and the bibliography resolution that
+        follows it are the tier's rules.
+        """
+        return tier_ingest.ingest_source(
             kind=kind,
             origin=origin,
+            source_id=source_id,
             title=title,
-            bibliography=bibliography,
-            page_count=page_count,
+            doi=doi,
+            arxiv_id=arxiv_id,
+            pmid=pmid,
+            pdf_metadata=dict(pdf_metadata) if pdf_metadata else None,
             byte_size=byte_size,
         )
-
-        chunks: list[SourceChunk] = self._chunker.chunk_text(
-            text=text,
-            document_id=source_id,
-            document_title=title,
-        )
-
-        return SourceIngestResult(source=source, chunks=chunks)

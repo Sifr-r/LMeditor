@@ -1,0 +1,2 @@
+This file is plain text.
+It is not a Word package, and the reader must refuse it.
