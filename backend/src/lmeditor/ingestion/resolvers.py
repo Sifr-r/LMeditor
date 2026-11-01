@@ -1,15 +1,44 @@
-"""Bibliography metadata resolver chain (PDF header → CrossRef → arXiv → PubMed → OpenAlex)."""
+"""The bibliography resolver chain, as a door onto the Kotlin tier.
+
+A source can name itself -- through a DOI, an arXiv id, a PMID, or the
+``/Info`` dictionary of the PDF it is -- and the resolver chain turns that
+into a bibliographic record. The chain runs five strategies in order:
+
+``PdfHeader`` reads the metadata the document carries; ``CrossRef``, ``arXiv``,
+``PubMed`` and ``OpenAlex`` each ask an upstream that can *verify* an
+identifier; ``User`` returns a record the operator typed by hand and is never
+part of the default chain.
+
+Every one of those strategies is implemented by the Kotlin tier, together
+with the rules that decide which upstream is asked, which identifier is safe
+to put in a request line, how large an answer may be and how a malformed
+document is reported. This module is the *door* onto those rules: it keeps
+the Python API its callers already use -- the classes, their signatures, the
+exceptions they raise -- and answers with the tier's answers.
+
+The original implementation is frozen in
+:mod:`lmeditor._reference.ingestion_resolvers`, where the parity harness can
+still compare the two sides.
+"""
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any, Optional, cast
+from typing import Any, Optional
 
-import httpx
-
-from lmeditor.core.exceptions import BibliographyResolutionError
+from lmeditor.core.exceptions import BibliographyResolutionError  # noqa: F401 - re-exported
 from lmeditor.core.schemas import BibliographicRecord
 from lmeditor.core.types import BibliographyResolverKind, SourceKind
+from lmeditor.ingestion.limits import MAX_RESOLVER_RESPONSE_BYTES
+from lmeditor.tier import ingest as tier_ingest
+
+#: The largest response body a resolver will read.
+#:
+#: The same number as the Kotlin tier's ``Limits.MAX_RESOLVER_RESPONSE_BYTES``;
+#: it is written out rather than read across the seam because a constant that
+#: could not be read without a running JVM would be useless to a module that
+#: is imported at startup.
+_MAX_RESOLVER_RESPONSE_BYTES: int = MAX_RESOLVER_RESPONSE_BYTES
 
 
 class BibliographyResolver(ABC):
@@ -33,7 +62,21 @@ class BibliographyResolver(ABC):
 
 
 class PdfHeaderBibliographyResolver(BibliographyResolver):
-    """Best-effort: extract /Title and /Author from PDF metadata."""
+    """Best-effort: extract /Title and /Author from PDF metadata.
+
+    This resolver is the *offline* one: it never makes a request, it reads the
+    metadata the PDF itself carries. It used to be dead code -- nothing ever
+    populated ``pdf_metadata`` -- and it is reachable again because the PDF
+    loader now extracts the ``/Info`` dictionary and hands it to the chain.
+
+    The DOI the metadata carries is put on the record, because the document
+    states it and the record should not hide it. The chain, however, tries the
+    identifier-bearing resolvers *before* this one whenever a DOI or an arXiv
+    id is known, so a PDF with a DOI is resolved by CrossRef (which returns a
+    year, a container and a canonical URL) and this resolver is the fallback.
+
+    The extraction is the Kotlin tier's; this resolver is the door onto it.
+    """
 
     kind = BibliographyResolverKind.PDF_HEADER
 
@@ -47,52 +90,41 @@ class PdfHeaderBibliographyResolver(BibliographyResolver):
         pmid: Optional[str] = None,
         pdf_metadata: Optional[dict[str, Any]] = None,
     ) -> Optional[BibliographicRecord]:
-        if not pdf_metadata:
-            return None
-        title = pdf_metadata.get("/Title") or pdf_metadata.get("Title")
-        author_raw = pdf_metadata.get("/Author") or pdf_metadata.get("Author")
-        if not title:
-            return None
-        authors: list[str] = []
-        if author_raw and isinstance(author_raw, str):
-            authors = [a.strip() for a in author_raw.replace(";", ",").split(",") if a.strip()]
-        return BibliographicRecord(
-            title=str(title),
-            authors=authors,
-            resolver=BibliographyResolverKind.PDF_HEADER,
+        return tier_ingest.resolve_bibliography(
+            self.kind,
+            source_id=source_id,
+            source_kind=source_kind,
+            doi=doi,
+            arxiv_id=arxiv_id,
+            pmid=pmid,
+            pdf_metadata=_metadata_wire(pdf_metadata),
         )
 
 
 class _HttpHibliResolver(BibliographyResolver):
-    """Base for CrossRef / arXiv / PubMed / OpenAlex (all HTTP JSON)."""
+    """Base for CrossRef / arXiv / PubMed / OpenAlex (all fetched over HTTP).
+
+    The class flag :attr:`expects_atom` says which body the tier decodes: JSON
+    for CrossRef / PubMed / OpenAlex, Atom XML for arXiv. It is a flag rather
+    than per-resolver guesswork so the JSON resolvers cannot be dragged into
+    the XML path by accident.
+
+    The fetch, the redirect discipline, the size cap and the identifier
+    validation are the Kotlin tier's, which fetches with the JDK's own HTTP
+    client. ``timeout_seconds`` and ``max_response_bytes`` keep their values,
+    which are the tier's own defaults; the seam does not carry a per-call
+    override, so setting them no longer changes what is fetched.
+    """
 
     kind: BibliographyResolverKind = BibliographyResolverKind.NONE  # override
 
-    def _fetch(self, url: str) -> dict[str, Any]:
-        try:
-            response = httpx.get(url, follow_redirects=True, timeout=self.timeout_seconds)
-            response.raise_for_status()
-            return cast(dict[str, Any], response.json())
-        except (httpx.HTTPError, ValueError) as exc:
-            raise BibliographyResolutionError(
-                resolver=self.kind.value,
-                origin=url,
-                reason=str(exc),
-            ) from exc
+    #: arXiv is the only upstream served over HTTP that answers with Atom XML.
+    expects_atom: bool = False
 
-    @abstractmethod
-    def _url(
-        self,
-        *,
-        doi: Optional[str],
-        arxiv_id: Optional[str],
-        pmid: Optional[str],
-    ) -> Optional[str]:
-        raise NotImplementedError
-
-    @abstractmethod
-    def _parse(self, payload: dict[str, Any]) -> Optional[BibliographicRecord]:
-        raise NotImplementedError
+    #: Largest response body this resolver will read. The upstreams answer
+    #: with one record (or a short Atom feed); anything bigger is refused
+    #: rather than buffered.
+    max_response_bytes: int = _MAX_RESOLVER_RESPONSE_BYTES
 
     def resolve(
         self,
@@ -104,179 +136,98 @@ class _HttpHibliResolver(BibliographyResolver):
         pmid: Optional[str] = None,
         **_kwargs: Any,
     ) -> Optional[BibliographicRecord]:
-        url = self._url(doi=doi, arxiv_id=arxiv_id, pmid=pmid)
-        if url is None:
-            return None
-        payload = self._fetch(url)
-        rec = self._parse(payload)
-        if rec is None:
-            return None
-        return rec.model_copy(update={"resolver": self.kind})
+        return tier_ingest.resolve_bibliography(
+            self.kind,
+            source_id=source_id,
+            source_kind=source_kind,
+            doi=doi,
+            arxiv_id=arxiv_id,
+            pmid=pmid,
+        )
 
 
 class CrossRefBibliographyResolver(_HttpHibliResolver):
+    """Resolves a DOI against the Crossref ``/works/{doi}`` endpoint."""
+
     kind = BibliographyResolverKind.CROSSREF
-
-    def _url(
-        self,
-        *,
-        doi: Optional[str],
-        arxiv_id: Optional[str] = None,
-        pmid: Optional[str] = None,
-    ) -> Optional[str]:
-        if not doi:
-            return None
-        return f"https://api.crossref.org/works/{doi}"
-
-    def _parse(self, payload: dict[str, Any]) -> Optional[BibliographicRecord]:
-        msg = payload.get("message") or {}
-        title_list = msg.get("title") or []
-        if not title_list:
-            return None
-        authors_raw = msg.get("author") or []
-        authors = [f"{a.get('given','')} {a.get('family','')}".strip() for a in authors_raw]
-        year: Optional[int] = None
-        issued = msg.get("issued", {}).get("date-parts", [[None]])[0]
-        if issued and issued[0]:
-            year = int(issued[0])
-        return BibliographicRecord(
-            title=str(title_list[0]),
-            authors=[a for a in authors if a],
-            year=year,
-            container_title=(msg.get("container-title") or [None])[0],
-            doi=msg.get("DOI"),
-            url=msg.get("URL"),
-            type=msg.get("type"),
-            resolver=self.kind,
-        )
 
 
 class ArxivBibliographyResolver(_HttpHibliResolver):
+    """Resolves an arXiv id against the Atom feed at ``export.arxiv.org``.
+
+    This is the one resolver whose upstream does not speak JSON: the query API
+    answers ``application/atom+xml``, which is why it sets
+    :attr:`expects_atom`.
+    """
+
     kind = BibliographyResolverKind.ARXIV
-
-    def _url(
-        self,
-        *,
-        doi: Optional[str] = None,
-        arxiv_id: Optional[str],
-        pmid: Optional[str] = None,
-    ) -> Optional[str]:
-        if not arxiv_id:
-            return None
-        return f"http://export.arxiv.org/api/query?id_list={arxiv_id}"
-
-    def _parse(self, payload: dict[str, Any]) -> Optional[BibliographicRecord]:
-        # arXiv returns Atom XML; we rely on the caller having parsed it to JSON-Like dict.
-        # For brevity, expect {"entries": [{"title": "...", "authors": [...], "published": "YYYY-MM-DD..."}]}
-        entries = payload.get("entries") or []
-        if not entries:
-            return None
-        e = entries[0]
-        title = e.get("title")
-        if not title:
-            return None
-        authors_raw = e.get("authors") or []
-        authors = [a.get("name", "") for a in authors_raw if a.get("name")]
-        published = e.get("published") or ""
-        year: Optional[int] = int(published[:4]) if published[:4].isdigit() else None
-        return BibliographicRecord(
-            title=title.strip(),
-            authors=authors,
-            year=year,
-            publication_date=published or None,
-            url=e.get("id"),
-            type="preprint",
-            resolver=self.kind,
-        )
+    expects_atom = True
 
 
 class PubMedBibliographyResolver(_HttpHibliResolver):
+    """Resolves a PMID against the PubMed ``esummary`` endpoint."""
+
     kind = BibliographyResolverKind.PUBMED
-
-    def _url(
-        self,
-        *,
-        doi: Optional[str] = None,
-        arxiv_id: Optional[str] = None,
-        pmid: Optional[str],
-    ) -> Optional[str]:
-        if not pmid:
-            return None
-        return f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi?db=pubmed&id={pmid}&retmode=json"
-
-    def _parse(self, payload: dict[str, Any]) -> Optional[BibliographicRecord]:
-        # Walrus operator binds the first key of `result` to `pmid` and looks up its value
-        # in the same expression. `pmid` here is the local re-extraction, not the input arg.
-        result = (payload.get("result") or {}).get(
-            pmid := next(iter((payload.get("result") or {})), "")
-        )
-        if not result:
-            return None
-        title = result.get("title")
-        if not title:
-            return None
-        authors_raw = result.get("authors") or []
-        authors = [a.get("name", "") for a in authors_raw if a.get("name")]
-        year: Optional[int] = None
-        pubdate = result.get("pubdate") or ""
-        if pubdate[:4].isdigit():
-            year = int(pubdate[:4])
-        return BibliographicRecord(
-            title=title,
-            authors=[a for a in authors if a],
-            year=year,
-            publication_date=pubdate or None,
-            container_title=result.get("source"),
-            url=f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/",
-            type="journal-article",
-            resolver=self.kind,
-        )
 
 
 class OpenAlexBibliographyResolver(_HttpHibliResolver):
+    """Resolves a DOI against the OpenAlex ``works`` endpoint."""
+
     kind = BibliographyResolverKind.OPENALEX
-
-    def _url(
-        self,
-        *,
-        doi: Optional[str],
-        arxiv_id: Optional[str] = None,
-        pmid: Optional[str] = None,
-    ) -> Optional[str]:
-        if not doi:
-            return None
-        return f"https://api.openalex.org/works/doi:{doi}"
-
-    def _parse(self, payload: dict[str, Any]) -> Optional[BibliographicRecord]:
-        title = payload.get("title") or payload.get("display_name")
-        if not title:
-            return None
-        authorships = payload.get("authorships") or []
-        authors = [a.get("author", {}).get("display_name", "") for a in authorships]
-        year: Optional[int] = payload.get("publication_year")
-        return BibliographicRecord(
-            title=title,
-            authors=[a for a in authors if a],
-            year=year,
-            container_title=(payload.get("primary_location") or {}).get("source", {}).get("display_name"),
-            doi=payload.get("doi"),
-            url=payload.get("id"),
-            type=payload.get("type"),
-            resolver=self.kind,
-        )
 
 
 class UserBibliographyResolver(BibliographyResolver):
-    """Always returns None; populated manually via client UI (out of plan scope)."""
+    """Returns a record the operator supplied by hand.
+
+    Some sources have no DOI, no arXiv id and no metadata: a working paper
+    that never got a DOI, a report, a slide deck. The operator is the only
+    source of a bibliographic record for those, so this resolver carries the
+    record they typed.
+
+    It is deliberately **not** part of
+    :meth:`BibliographyResolverChain.default`: the chain resolves what it can
+    from the document, and a hand-entered record is an assertion about a
+    document that no upstream can confirm. A caller who wants it consulted
+    adds it to the chain explicitly, and it is always consulted last so a
+    record an upstream can verify wins.
+    """
 
     kind = BibliographyResolverKind.USER
 
-    def resolve(self, **_kwargs: Any) -> Optional[BibliographicRecord]:
-        return None
+    def __init__(
+        self,
+        record: Optional[BibliographicRecord] = None,
+        *,
+        source_ids: Optional[set[str]] = None,
+    ) -> None:
+        self._record = record
+        self._source_ids = set(source_ids) if source_ids else None
+
+    def resolve(self, **kwargs: Any) -> Optional[BibliographicRecord]:
+        return tier_ingest.resolve_bibliography(
+            self.kind,
+            source_id=str(kwargs.get("source_id") or ""),
+            source_kind=kwargs.get("source_kind", SourceKind.PDF),
+            record=_record_wire(self._record) if self._record is not None else None,
+            source_ids=sorted(self._source_ids) if self._source_ids is not None else None,
+        )
 
 
 class BibliographyResolverChain:
-    """Runs resolvers in order; returns the first non-None result, or None."""
+    """Runs resolvers in order; returns the first non-None result, or None.
+
+    The order is the one the resolvers were declared in, with one exception:
+    when an identifier (a DOI, an arXiv id or a PMID) is known, the resolver
+    that can *verify* it is tried before the PDF-header resolver, which can
+    only report what the document says about itself. A PDF whose metadata
+    carries a DOI is therefore resolved by CrossRef -- with a year, a
+    container and a canonical URL -- and falls back to the header resolver only
+    when no upstream answers.
+
+    The order, the enrichment of a request with an identifier the document's
+    own metadata carries, and the fall-through from a failed strategy to the
+    next one are the Kotlin tier's rules. This chain is the door onto them.
+    """
 
     def __init__(self, resolvers: list[BibliographyResolver]) -> None:
         self._resolvers = resolvers
@@ -292,12 +243,70 @@ class BibliographyResolverChain:
         ])
 
     def resolve(self, **kwargs: Any) -> Optional[BibliographicRecord]:
-        for resolver in self._resolvers:
-            try:
-                rec = resolver.resolve(**kwargs)
-            except BibliographyResolutionError:
-                # Move to the next resolver on failure.
-                continue
-            if rec is not None:
-                return rec
+        return tier_ingest.resolve_bibliography_chain(
+            [_resolver_spec(resolver) for resolver in self._resolvers],
+            source_id=str(kwargs.get("source_id") or ""),
+            source_kind=kwargs.get("source_kind", SourceKind.PDF),
+            doi=kwargs.get("doi"),
+            arxiv_id=kwargs.get("arxiv_id"),
+            pmid=kwargs.get("pmid"),
+            pdf_metadata=_metadata_wire(kwargs.get("pdf_metadata")),
+        )
+
+
+# ============================================================================
+# The wire forms
+# ============================================================================
+#
+# The two helpers below are the only place the door knows how a request is
+# spelled. Everything else -- which upstream is asked, what the answer means,
+# when a strategy has failed -- is answered by the tier.
+
+
+def _metadata_wire(metadata: Optional[dict[str, Any]]) -> Optional[dict[str, str]]:
+    """Return the metadata entries the tier can read.
+
+    Only the text entries are forwarded: the rule that reads them looks for
+    text, so an entry that is not text is not metadata a resolver can use.
+    """
+    if not metadata:
         return None
+    return {
+        str(key): value
+        for key, value in metadata.items()
+        if isinstance(value, str)
+    }
+
+
+def _record_wire(record: BibliographicRecord) -> dict[str, Any]:
+    """Return a record in the wire form the tier reads."""
+    return {
+        "title": record.title,
+        "authors": list(record.authors),
+        "year": record.year,
+        "publication_date": record.publication_date,
+        "container_title": record.container_title,
+        "volume": record.volume,
+        "issue": record.issue,
+        "pages": record.pages,
+        "doi": record.doi,
+        "url": record.url,
+        "type": record.type,
+        "resolver": record.resolver.value,
+    }
+
+
+def _resolver_spec(resolver: BibliographyResolver) -> dict[str, Any]:
+    """Return the wire description of one strategy in a chain.
+
+    A strategy is named by its kind. The user resolver is the one that needs
+    more than a kind: it carries the record the operator typed and the
+    sources that record applies to.
+    """
+    spec: dict[str, Any] = {"kind": resolver.kind.value}
+    if isinstance(resolver, UserBibliographyResolver):
+        if resolver._record is not None:
+            spec["record"] = _record_wire(resolver._record)
+        if resolver._source_ids is not None:
+            spec["source_ids"] = sorted(resolver._source_ids)
+    return spec

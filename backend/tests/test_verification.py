@@ -183,6 +183,33 @@ def test_claim_extractor_invalid_input() -> None:
     assert extractor.extract_claims("   ") == []
 
 
+def test_extract_claims_maps_a_repeated_sentence_to_its_own_occurrence() -> None:
+    """A sentence that occurs twice must be located at both of its positions.
+
+    The lookup used to be ``text.find(sentence)``, which always returned the
+    *first* occurrence, so every repetition of a sentence pointed at the same
+    span of the document.
+    """
+    sentence = "The experiment failed twice."
+    text = f"{sentence} {sentence} The experiment finally succeeded."
+
+    claims = extract_claims(text, section_id="sec_repeat")
+
+    assert len(claims) == 3
+    first, second, third = claims
+
+    # Each occurrence points at its own place in the document.
+    assert first.char_start == 0
+    assert second.char_start == len(sentence) + 1
+    assert third.char_start == 2 * (len(sentence) + 1)
+    assert first.char_start != second.char_start
+
+    # And the span really does contain the sentence it claims to come from.
+    assert text[first.char_start : first.char_end] == sentence
+    assert text[second.char_start : second.char_end] == sentence
+    assert text[third.char_start : third.char_end] == "The experiment finally succeeded."
+
+
 # ============================================================================
 # 3. NLI Evaluator Tests
 # ============================================================================

@@ -1,7 +1,43 @@
-"""Stanford STORM conversational research loop between perspective agents and provenance indexer."""
+"""Conversational research loop between perspective agents and a provenance indexer.
+
+The loop answers a question with the passages it retrieved and nothing else.
+Every answer quotes the sentence of a retrieved chunk that actually bears on
+the question and names the chunk it came from, so a reader can walk from the
+answer back to the source. The takeaways of a session are derived from the
+turns that were actually held: which passages carried the weight, what they
+said, and which inquiries found nothing at all.
+
+When a language model is configured and ``use_dspy`` is enabled, the model
+writes the synthesis sentence that frames the retrieved evidence. The
+grounded quotations themselves are always added by the tier, so a model
+can add framing but can never introduce an uncited claim.
+
+This module is the **door**: the loop's rules -- the plan of the questions,
+the grounded answer, the takeaways and the way the sessions are consolidated
+into a research memory -- are the Kotlin tier's, they are implemented once in
+``lmeditor.discovery``, and the tier serves them across the NDJSON seam. The
+implementation this module used to carry now lives in
+``lmeditor._reference.discovery_dialogue``, frozen.
+
+The parity harness does not compare those two sides yet. It declares
+``discovery_dialogue`` as a *gap*: it names the Kotlin file that holds the
+counterpart, and no check asks both sides the same question about this rule.
+
+Two things stay on this side of the seam, because they cannot be rules:
+
+* the **retrieval**, because the vector index and its ranking are the Python
+  tier's; and
+* the **language model**, because a model is model-bound work: it reads the
+  passages and writes the framing sentence.
+
+There is deliberately no fallback to a Python implementation here: a silent
+fallback would hide the exact drift the Kotlin tier exists to remove -- two
+implementations that disagree, with only one of them in the request path.
+"""
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Sequence
 
 from lmeditor.core.exceptions import DialogueError, ValidationError
@@ -14,15 +50,40 @@ from lmeditor.core.schemas import (
 )
 from lmeditor.core.types import ProvenanceIndexerProtocol
 
+# These names were bound in this module's namespace and callers may still
+# reach them through it, so they stay bound. The rules behind them are the
+# tier's: `content_tokens` and `split_sentences` are the lexical analysis the
+# tier answers, and `GENERIC_TERMS` is the table the tier ranks against.
+from lmeditor.discovery.source_analysis import (
+    GENERIC_TERMS,
+    content_tokens,
+    salient_terms,
+    split_sentences,
+)
+from lmeditor.tier import discovery as tier_discovery
+
+logger = logging.getLogger(__name__)
+
+#: Cached DSPy program used to frame the retrieved evidence.
+_SYNTHESIS_PROGRAM: Any = None
+
 
 class DialogueLoop:
-    """Orchestrates multi-turn simulated Q&A inquiries grounded in source provenance."""
+    """Orchestrates multi-turn Q&A inquiries grounded in source provenance.
+
+    Args:
+        use_dspy: Whether to use a language model to frame the retrieved
+            evidence. The flag only takes effect when a language model is
+            configured; without one the answers are assembled from the
+            retrieved passages alone.
+        top_k_per_turn: Number of source chunks to retrieve per research turn.
+    """
 
     def __init__(self, use_dspy: bool = False, top_k_per_turn: int = 3) -> None:
         """Initialize the conversational research loop.
 
         Args:
-            use_dspy: Whether to invoke DSPy for question formulation/answer synthesis.
+            use_dspy: Whether to invoke DSPy for answer synthesis.
             top_k_per_turn: Number of source chunks to retrieve per research turn.
         """
         self.use_dspy = use_dspy
@@ -86,75 +147,9 @@ class DialogueLoop:
         """
         self.validate_dialogue_inputs(perspective, indexer, num_turns)
 
-        turns: list[DialogueTurn] = []
-        questions_pool = list(perspective.guiding_questions) + [
-            f"What empirical evidence addresses {focus}?" for focus in perspective.focus_areas
-        ]
-
-        for turn_idx in range(num_turns):
-            turn_id = f"turn_{perspective.id}_{turn_idx + 1}"
-
-            # 1. Select or formulate question
-            if turn_idx < len(questions_pool):
-                question = questions_pool[turn_idx]
-            else:
-                question = (
-                    f"From the perspective of a {perspective.role.value}, what key trade-offs "
-                    f"and operational nuances in {perspective.domain} require deeper inquiry?"
-                )
-
-            # 2. Retrieve chunks from indexer
-            try:
-                retrieved_chunks = indexer.query(question, top_k=self.top_k_per_turn)
-            except Exception as exc:
-                raise DialogueError(
-                    f"Provenance indexer query failed at turn {turn_idx + 1}: {exc}",
-                    perspective_id=perspective.id,
-                    turn_index=turn_idx,
-                    details={"error": str(exc), "query": question},
-                ) from exc
-
-            # 3. Grounded answer synthesis
-            cited_ids: list[str] = []
-            answer_parts: list[str] = []
-
-            if retrieved_chunks:
-                for chunk in retrieved_chunks:
-                    cid = chunk.chunk_id
-                    cited_ids.append(cid)
-                    # Extract concise snippet
-                    snippet = chunk.text.strip().replace("\n", " ")
-                    if len(snippet) > 160:
-                        snippet = snippet[:157] + "..."
-                    answer_parts.append(f"According to [{cid}]: \"{snippet}\"")
-
-                synthesis_text = (
-                    f"In response to the inquiry regarding '{question}', empirical evidence demonstrates: "
-                    + " ".join(answer_parts)
-                )
-            else:
-                synthesis_text = (
-                    f"No direct source chunks were matched in the provenance index for '{question}'. "
-                    "This represents an ungrounded exploratory boundary requiring further factual documentation."
-                )
-
-            turns.append(
-                DialogueTurn(
-                    turn_id=turn_id,
-                    question=question,
-                    answer=synthesis_text,
-                    referenced_chunk_ids=cited_ids,
-                )
-            )
-
-        # 4. Synthesize overarching session takeaways
-        takeaways = self._extract_takeaways(perspective, turns)
-
-        return DialogueSession(
-            perspective_id=perspective.id,
-            turns=turns,
-            synthesized_takeaways=takeaways,
-        )
+        turns = self._plan_turns(perspective, indexer, num_turns)
+        memory = tier_discovery.dialogue_memory([(perspective, turns)])
+        return memory.sessions[0]
 
     def conduct_all_dialogues(
         self,
@@ -186,66 +181,135 @@ class DialogueLoop:
             if not isinstance(p, Perspective):
                 raise ValidationError(
                     f"perspectives[{idx}] must be a Perspective instance, got {type(p).__name__}",
-                    field=f"perspectives[{idx}]",
+                    field="perspectives",
                     value=p,
                 )
 
-        sessions: list[DialogueSession] = []
-        all_chunk_ids: list[str] = []
-        seen_chunk_ids: set[str] = set()
-        collected_takeaways: list[str] = []
+        planned = [
+            (persp, self._plan_turns(persp, indexer, turns_per_session))
+            for persp in perspectives
+        ]
+        return tier_discovery.dialogue_memory(planned)
 
-        topic = perspectives[0].domain or "Document Research Topic"
-
-        for persp in perspectives:
-            session = self.conduct_dialogue(persp, indexer, num_turns=turns_per_session)
-            sessions.append(session)
-
-            for turn in session.turns:
-                for cid in turn.referenced_chunk_ids:
-                    if cid not in seen_chunk_ids:
-                        seen_chunk_ids.add(cid)
-                        all_chunk_ids.append(cid)
-
-            collected_takeaways.extend(session.synthesized_takeaways)
-
-        return ResearchMemory(
-            topic=topic,
-            sessions=sessions,
-            all_referenced_chunk_ids=all_chunk_ids,
-            collected_takeaways=collected_takeaways,
-        )
-
-    def _extract_takeaways(
+    # ------------------------------------------------------------------
+    # Retrieval
+    # ------------------------------------------------------------------
+    def _plan_turns(
         self,
         perspective: Perspective,
-        turns: list[DialogueTurn],
-    ) -> list[str]:
-        """Extract high-level, actionable research insights from completed turns."""
-        takeaways: list[str] = []
-        role_label = perspective.role.value.replace("_", " ").title()
+        indexer: ProvenanceIndexerProtocol,
+        num_turns: int,
+    ) -> list[dict[str, Any]]:
+        """The turns a session will hold, and the passages each of them saw.
 
-        takeaways.append(
-            f"[{role_label}] Identified key domain dependencies and core assumptions under {perspective.domain}."
+        The plan of the questions is the tier's, and the retrieval is this
+        tier's: the index and its ranking live here. Each turn therefore
+        carries the question that was asked, the passages the index returned
+        for it and, when a language model wrote one, the framing sentence it
+        produced.
+        """
+        turns: list[dict[str, Any]] = []
+
+        for question in tier_discovery.dialogue_questions(perspective, num_turns):
+            turn_index = len(turns)
+
+            try:
+                retrieved_chunks = indexer.query(question, top_k=self.top_k_per_turn)
+            except Exception as exc:
+                raise DialogueError(
+                    f"Provenance indexer query failed at turn {turn_index + 1}: {exc}",
+                    perspective_id=perspective.id,
+                    turn_index=turn_index,
+                    details={"error": str(exc), "query": question},
+                ) from exc
+
+            framing = ""
+            if self.use_dspy and retrieved_chunks:
+                framing = self._synthesize_with_lm(perspective, question, retrieved_chunks)
+
+            turns.append(
+                {
+                    "question": question,
+                    "chunks": [chunk.model_dump(mode="json") for chunk in retrieved_chunks],
+                    "framing": framing,
+                }
+            )
+
+        return turns
+
+    # ------------------------------------------------------------------
+    # Answer synthesis
+    # ------------------------------------------------------------------
+    def _synthesize_with_lm(
+        self,
+        perspective: Perspective,
+        question: str,
+        retrieved_chunks: Sequence[SourceChunk],
+    ) -> str:
+        """Frame the retrieved evidence with the configured language model.
+
+        The model only writes the framing sentence. The grounded quotations
+        are added by the tier, so the model cannot introduce an uncited claim.
+
+        An empty answer means "no framing": the tier then uses its own
+        deterministic framing, which is what this module did when no language
+        model was configured.
+        """
+        from lmeditor.llm import is_configured, require_lm
+
+        if not is_configured():
+            logger.info(
+                "Dialogue synthesis is running without a language model; "
+                "answering from the retrieved passages alone."
+            )
+            return ""
+
+        require_lm("dialogue answer synthesis")
+
+        passages = "\n\n".join(
+            f"--- PASSAGE {index + 1} [{chunk.chunk_id}] ---\n{chunk.text}"
+            for index, chunk in enumerate(retrieved_chunks)
         )
-
-        cited_count = sum(len(t.referenced_chunk_ids) for t in turns)
-        if cited_count > 0:
-            takeaways.append(
-                f"[{role_label}] Grounded {cited_count} factual citations validating the perspective's inquiries."
+        try:
+            program = self._ensure_synthesis_program()
+            prediction = program(
+                question=question,
+                passages=passages,
+                role=perspective.role.value,
             )
-        else:
-            takeaways.append(
-                f"[{role_label}] Highlighted key empirical knowledge gaps requiring primary source acquisition."
-            )
+            framing = str(getattr(prediction, "synthesis", "") or "").strip()
+        except Exception as exc:
+            raise DialogueError(
+                f"Language model failed to synthesise the answer: {exc}",
+                perspective_id=perspective.id,
+                details={"error": str(exc), "query": question},
+            ) from exc
 
-        if perspective.focus_areas:
-            primary_focus = perspective.focus_areas[0]
-            takeaways.append(
-                f"[{role_label}] Prioritized analytical focus on: {primary_focus}."
+        if not framing:
+            raise DialogueError(
+                "Language model returned an empty synthesis for the retrieved evidence.",
+                perspective_id=perspective.id,
+                details={"query": question},
             )
+        return framing
 
-        return takeaways
+    @staticmethod
+    def _ensure_synthesis_program() -> Any:
+        """Build (once) the DSPy program that frames retrieved evidence."""
+        global _SYNTHESIS_PROGRAM  # noqa: PLW0603 - module-level cache of the program
+
+        if _SYNTHESIS_PROGRAM is None:
+            import dspy
+
+            signature = dspy.Signature(
+                "question: str, passages: str, role: str -> synthesis: str"
+            ).with_instructions(
+                "Answer the question in one or two sentences, strictly from the "
+                "supplied passages. Name the concepts the passages cover. Do not "
+                "introduce any fact that is not in the passages."
+            )
+            _SYNTHESIS_PROGRAM = dspy.Predict(signature)
+        return _SYNTHESIS_PROGRAM
 
 
 def conduct_dialogue(
