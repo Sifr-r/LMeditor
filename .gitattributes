@@ -1,0 +1,44 @@
+# Checkout stability of the fixtures.
+#
+# Git decides whether a file is text by looking for NUL bytes: a file with
+# none is text, and with core.autocrlf turned on its LF line endings are
+# rewritten to CRLF on checkout.  That rewrite does not show up in a diff,
+# and it changes bytes the fixtures assert on:
+#
+#   * the PDF fixtures carry a classic cross-reference table of absolute
+#     byte offsets, so a converted file points its offsets at the wrong
+#     bytes and loses the document information;
+#   * the compatibility corpus carries a sha256 per fixture in
+#     MANIFEST.json, so a converted file no longer matches its digest.
+#
+# The rules below pin the fixtures to the bytes they are written with.
+
+# Binary formats: never EOL-converted, never merged as text.
+*.pdf binary
+*.docx binary
+*.doc binary
+*.png binary
+*.ico binary
+
+# The shared TSV corpora are read line by line, and the line endings are
+# part of what they are:
+#
+#   * word_whitespace_corpus.tsv is written with newline="\n" by
+#     backend/scripts/generate_word_shared_corpus.py, so LF is its canonical
+#     form.  The CRLF it pins is an escape sequence inside a record, not a
+#     line ending of the file.
+#   * ip_policy_reference.tsv is written with CRLF line endings, so CRLF is
+#     its canonical form.
+#
+# LF is the repository's canonical text form, so it is the default; the one
+# CRLF corpus is named explicitly.
+*.tsv text eol=lf
+kotlin/ingest/src/test/resources/fixtures/ip_policy_reference.tsv text eol=crlf
+
+# The compatibility corpus is digest-pinned by MANIFEST.json and written
+# byte for byte by generate_corpus.py, so no file under it may change a
+# byte on checkout.  This rule comes last because it is the last word:
+# nothing under the corpus is converted, whatever the rules above say.
+# It covers renamed.txt too, which is a Word package under a .txt name --
+# a rule that made every .txt text would corrupt it.
+backend/tests/fixtures/compatibility/** -text
