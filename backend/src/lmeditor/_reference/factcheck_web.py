@@ -101,6 +101,20 @@ class _DuckDuckGoResultParser(HTMLParser):
     ``result__snippet`` for the excerpt -- and simply ignores anything it
     does not recognise. A page whose markup changed yields no results rather
     than an exception.
+
+    The state this parser keeps is named ``_pending_result`` rather than
+    ``_pending`` on purpose. ``html.parser.HTMLParser`` acquired an
+    internal ``_pending`` buffer in CPython 3.13.16 and 3.14.6, and it
+    joins that buffer in ``close()``. A subclass that shadows the name
+    replaces the buffer with its own state, and the stdlib then joins
+    whatever the subclass left there -- which is not iterable, and the
+    parse dies with ``TypeError: can only join an iterable`` after the
+    first result was already recorded. The parse lost the last result and
+    the tiers disagreed about how many there were.
+
+    Nothing else here changes. The rule this witness states is the rule it
+    always stated; only the name of a private attribute moved, so that the
+    rule survives a change in the standard library it never depended on.
     """
 
     def __init__(self) -> None:
@@ -110,7 +124,7 @@ class _DuckDuckGoResultParser(HTMLParser):
         self._depth: int = 0
         self._parts: list[str] = []
         self._href: str = ""
-        self._pending: WebResult | None = None
+        self._pending_result: WebResult | None = None
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         """Begin capturing a title or a snippet when the tag is one of ours."""
@@ -141,18 +155,18 @@ class _DuckDuckGoResultParser(HTMLParser):
             return
         text = " ".join(" ".join(self._parts).split())
         if self._mode == "title":
-            self._pending = WebResult(
+            self._pending_result = WebResult(
                 url=normalise_result_url(self._href),
                 title=text,
             )
-        elif self._pending is not None:
-            self._pending = WebResult(
-                url=self._pending.url,
-                title=self._pending.title,
+        elif self._pending_result is not None:
+            self._pending_result = WebResult(
+                url=self._pending_result.url,
+                title=self._pending_result.title,
                 snippet=text,
             )
-            self.results.append(self._pending)
-            self._pending = None
+            self.results.append(self._pending_result)
+            self._pending_result = None
         self._mode = ""
         self._parts = []
 
@@ -168,9 +182,9 @@ class _DuckDuckGoResultParser(HTMLParser):
 
     def _flush(self) -> None:
         """Record a result whose snippet never arrived."""
-        if self._pending is not None:
-            self.results.append(self._pending)
-            self._pending = None
+        if self._pending_result is not None:
+            self.results.append(self._pending_result)
+            self._pending_result = None
 
 
 def normalise_result_url(href: str) -> str:

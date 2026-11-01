@@ -258,3 +258,41 @@ def test_the_frozen_operator_rule_keeps_the_provenance_and_drops_the_verdict() -
     assert merged.is_verified is False
     assert merged.status == SectionStatus.PENDING
     assert drafted.content == "The pipeline drafted this."
+
+
+def test_the_frozen_web_parser_keeps_every_result_it_finds() -> None:
+    """The frozen witness must still find every result in a result page.
+
+    The web-evidence witness parses a search result page with
+    ``html.parser.HTMLParser``. CPython gave that class an internal
+    ``_pending`` buffer in 3.13.16 and 3.14.6, and joins it in ``close()``.
+    A subclass that keeps its own state under that name replaces the
+    buffer, the stdlib joins the subclass's state instead, and the parse
+    dies with ``TypeError: can only join an iterable`` -- after the first
+    result was already recorded, so the page yielded one result instead of
+    two.
+
+    The tiers then disagreed about how many results the page held, and the
+    parity harness reported a divergence in a rule that had not changed.
+    This asserts the count directly, so a change in the standard library
+    is caught here rather than in the harness, where it costs a Kotlin
+    build to see.
+    """
+    from lmeditor._reference.factcheck_web import parse_search_results
+
+    page = (
+        b"<html><body>\n"
+        b'<div class="result">\n'
+        b'  <a class="result__a" href="https://reefs.example.org/census">Reef census</a>\n'
+        b'  <a class="result__a" href="/relative/second">Second result</a>\n'
+        b"</div>\n"
+        b"</body></html>"
+    )
+
+    results = parse_search_results(page)
+
+    assert [result.title for result in results] == ["Reef census", "Second result"]
+    assert [result.url for result in results] == [
+        "https://reefs.example.org/census",
+        "https://html.duckduckgo.com/relative/second",
+    ]
