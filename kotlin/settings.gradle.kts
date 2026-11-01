@@ -42,3 +42,7 @@ include(":server") // session broker and wire models for the SSE transport
 include(":vault") // the rules of a vault: paths, markdown grammar and store
 include(":notebooks") // the rules of a notebook: ids, manifest and store
 include(":bridge") // the NDJSON stdio seam the Python tier calls into
+
+// The desktop client. It is not a tier module: it sits above the tier and
+// depends downward on :core alone. See build.gradle.kts and CONTRACTS.md.
+include(":desktop")
