@@ -22,6 +22,13 @@ from typing import Mapping, Sequence
 
 REPO = Path(__file__).resolve().parents[2]
 PLATFORM_CHECKS = REPO / "backend" / "platform-checks.json"
+#: ``subprocess.CREATE_NEW_PROCESS_GROUP`` exists only on Windows, and POSIX
+#: rejects a non-zero ``creationflags`` outright. The gate runs on both
+#: platforms, so the flag is read defensively: it is the Windows value there
+#: and zero everywhere else. The gate's own type check is run for both
+#: platforms as well, so a branch that only one of them can reach is
+#: checked rather than assumed.
+CREATE_NEW_PROCESS_GROUP: int = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
 PORTABLE_EXCLUDED_MODULES = (
     "tests/test_word_real_word.py",
     "tests/test_word_app_conformance.py",
@@ -190,7 +197,7 @@ def run_check(
                 stdout=stream,
                 stderr=subprocess.STDOUT,
                 start_new_session=sys.platform != "win32",
-                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0,
+                creationflags=CREATE_NEW_PROCESS_GROUP,
             )
             try:
                 returncode = process.wait(timeout=timeout)
@@ -331,7 +338,26 @@ def verify_release(*, offline: bool, timeout: int, portable: bool = False) -> Pa
         raise ReleaseGateError("Kotlin build must produce exactly one self-contained tier jar")
     environment["LMEDITOR_KOTLIN_BRIDGE"] = str(tier_jars[0])
     python = sys.executable
-    run_check("strict Python typing", [python, "-m", "mypy", "--strict", "src", "scripts/verify_release.py", "--cache-dir", str(run_dir / "mypy-cache")], backend, environment, run_dir / "mypy.log", timeout)
+    for target_platform in ("linux", "win32"):
+        run_check(
+            f"strict Python typing ({target_platform})",
+            [
+                python,
+                "-m",
+                "mypy",
+                "--strict",
+                "--platform",
+                target_platform,
+                "src",
+                "scripts/verify_release.py",
+                "--cache-dir",
+                str(run_dir / "mypy-cache"),
+            ],
+            backend,
+            environment,
+            run_dir / f"mypy-{target_platform}.log",
+            timeout,
+        )
     pytest_report = run_dir / "pytest.xml"
     run_check("portable backend suite" if portable else "complete backend suite", backend_command, backend, environment, run_dir / "pytest.log", timeout)
     observed_python_skips: set[tuple[str, str]] = set()
