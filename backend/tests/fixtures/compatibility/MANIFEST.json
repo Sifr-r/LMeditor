@@ -1,0 +1,345 @@
+{
+  "schema_version": "1.0",
+  "fixtures": [
+    {
+      "id": "docx-minimal",
+      "path": "docx-minimal.docx",
+      "kind": "docx",
+      "exercises": "headings, a paragraph, bold and italic runs",
+      "sha256": "80d1fa53aa219f77b13080995ef06a2351f9738cdfa267438a7e56724d685a6b",
+      "expected": {
+        "read": "read",
+        "display": "not-applicable",
+        "edit": "not-applicable",
+        "preserve": "not-applicable",
+        "export": "not-applicable",
+        "limitation": "the corpus establishes that the package is read; display, editing, preservation and export are not measured here"
+      },
+      "generator": "generate_corpus.py::build_docx_minimal",
+      "notes": "The smallest document the corpus holds: the baseline every other DOCX fixture is compared against."
+    },
+    {
+      "id": "docx-table",
+      "path": "docx-table.docx",
+      "kind": "docx",
+      "exercises": "a table, merged cells and a repeating header row",
+      "sha256": "55a99ae09c5189945afb00d8448202cb11ab210b03e6ebece9ab4b64020d8d25",
+      "expected": {
+        "read": "read",
+        "display": "not-applicable",
+        "edit": "not-applicable",
+        "preserve": "not-applicable",
+        "export": "not-applicable",
+        "limitation": "the table, its grid span, its vertical merge and its header row are read; the corpus does not measure whether the merges survive a write"
+      },
+      "generator": "generate_corpus.py::build_docx_table",
+      "notes": "Merges are written the way Word writes them: a grid span on the cell itself and a vMerge pair across two rows."
+    },
+    {
+      "id": "docx-lists",
+      "path": "docx-lists.docx",
+      "kind": "docx",
+      "exercises": "a numbered list and a bulleted list",
+      "sha256": "cdf09c0f8a011e7c3332200acaf39a284bc19e4ba58a73522433c55b762ede34",
+      "expected": {
+        "read": "read",
+        "display": "not-applicable",
+        "edit": "not-applicable",
+        "preserve": "not-applicable",
+        "export": "not-applicable",
+        "limitation": "the two lists are read as list blocks; the corpus does not measure whether the numbering survives a write"
+      },
+      "generator": "generate_corpus.py::build_docx_lists",
+      "notes": "The bulleted list is nested one level, so the numbering part has to be read at two levels."
+    },
+    {
+      "id": "docx-link-footnote",
+      "path": "docx-link-footnote.docx",
+      "kind": "docx",
+      "exercises": "a hyperlink and a footnote",
+      "sha256": "03d64167abb3c03122a18e5870ebeba20a26d46719703412118246c41c77e732",
+      "expected": {
+        "read": "read",
+        "display": "not-applicable",
+        "edit": "not-applicable",
+        "preserve": "not-applicable",
+        "export": "not-applicable",
+        "limitation": "the hyperlink target and the footnote text are read; the corpus does not measure whether a rewritten hyperlink keeps its target"
+      },
+      "generator": "generate_corpus.py::build_docx_link_footnote",
+      "notes": "The hyperlink is an external relationship, so the target has to travel through the package's relationship part."
+    },
+    {
+      "id": "docx-image",
+      "path": "docx-image.docx",
+      "kind": "docx",
+      "exercises": "an inline image",
+      "sha256": "254da42054192f4c2b53208844e2f3134911111e92f2b6df785ca7bbe0a24c9c",
+      "expected": {
+        "read": "read",
+        "display": "limited",
+        "edit": "not-applicable",
+        "preserve": "not-applicable",
+        "export": "not-applicable",
+        "limitation": "the image part is read as a media reference; the pixels are not rendered here, so display is limited to the reference"
+      },
+      "generator": "generate_corpus.py::build_docx_image",
+      "notes": "A small inline picture, the ordinary case."
+    },
+    {
+      "id": "docx-large-image",
+      "path": "docx-large-image.docx",
+      "kind": "docx",
+      "exercises": "a large image: the corpus's large asset",
+      "sha256": "c1f3279a205b2e11e8bede25973a7453a52902d142cf83b4e81d0dec4d984e9c",
+      "expected": {
+        "read": "read",
+        "display": "limited",
+        "edit": "not-applicable",
+        "preserve": "not-applicable",
+        "export": "not-applicable",
+        "limitation": "the large image part is read as a media reference; the pixels are not rendered here, so display is limited to the reference"
+      },
+      "generator": "generate_corpus.py::build_docx_large_image",
+      "notes": "A 256 by 256 picture whose bytes do not compress: the corpus's large asset, and the case a size limit would have to name."
+    },
+    {
+      "id": "docx-tracked-changes",
+      "path": "docx-tracked-changes.docx",
+      "kind": "docx",
+      "exercises": "a tracked insertion and a tracked deletion",
+      "sha256": "57c59585d01e717ff1cd63c4998c7f0257e797fa5e25fade67bc0eeb29298933",
+      "expected": {
+        "read": "read",
+        "display": "not-applicable",
+        "edit": "limited",
+        "preserve": "not-applicable",
+        "export": "not-applicable",
+        "limitation": "the insertion and the deletion are read as revisions; accepting or rejecting a revision is not established here"
+      },
+      "generator": "generate_corpus.py::build_docx_tracked_changes",
+      "notes": "Both revision kinds in one paragraph, so the reader's revision handling is measured together."
+    },
+    {
+      "id": "docx-comments",
+      "path": "docx-comments.docx",
+      "kind": "docx",
+      "exercises": "a comment anchored to a run",
+      "sha256": "b0d607e98716e43bf08d5a3d849f78322e279475e91530d7951ceed93e16c8df",
+      "expected": {
+        "read": "read",
+        "display": "not-applicable",
+        "edit": "limited",
+        "preserve": "not-applicable",
+        "export": "not-applicable",
+        "limitation": "the comment, its author and its anchor are read; resolving or editing a comment is not established here"
+      },
+      "generator": "generate_corpus.py::build_docx_comments",
+      "notes": "The comment part is separate from the document part, and the anchor spans one run."
+    },
+    {
+      "id": "docx-unicode",
+      "path": "docx-unicode.docx",
+      "kind": "docx",
+      "exercises": "CJK, RTL, combining marks, an emoji outside the BMP and a normalization-sensitive sequence",
+      "sha256": "1c5aa4b0be3c634b655c401179d1b909b209d6f2afde333cb2c4899efe20d40b",
+      "expected": {
+        "read": "read",
+        "display": "limited",
+        "edit": "not-applicable",
+        "preserve": "not-applicable",
+        "export": "not-applicable",
+        "limitation": "the text is read exactly as it is written and is not normalised: the decomposed ring and the precomposed ring both survive, and the zero width joiner is kept; the corpus does not establish that a renderer shapes the RTL runs"
+      },
+      "generator": "generate_corpus.py::build_docx_unicode",
+      "notes": "The decomposed ring (A + U+030A) and the precomposed ring (U+00C5) are both in the document, so a normalising reader would change it."
+    },
+    {
+      "id": "docx-difficult-layout",
+      "path": "docx-difficult-layout.docx",
+      "kind": "docx",
+      "exercises": "a very long paragraph and a long table",
+      "sha256": "d0107cc8015446473fe8be71442ec27826359ac67dbb8946fa1ce4968375318c",
+      "expected": {
+        "read": "read",
+        "display": "not-applicable",
+        "edit": "not-applicable",
+        "preserve": "not-applicable",
+        "export": "not-applicable",
+        "limitation": "the long paragraph and the long table are read; the corpus does not measure pagination, line breaking or block splitting"
+      },
+      "generator": "generate_corpus.py::build_docx_difficult_layout",
+      "notes": "Four hundred sentences in one paragraph and a hundred and fifty rows of six columns: the difficult layout case."
+    },
+    {
+      "id": "docx-corrupt-truncated",
+      "path": "docx-corrupt-truncated.docx",
+      "kind": "docx-corrupt",
+      "exercises": "a truncated zip archive",
+      "sha256": "f2bc0d2975ea69e6aaaa2035a0f5f9fa020ea48944b97c03335ec8a36e930852",
+      "expected": {
+        "read": "unsupported",
+        "display": "not-applicable",
+        "edit": "not-applicable",
+        "preserve": "not-applicable",
+        "export": "not-applicable",
+        "limitation": "the archive is cut in half, so it is not a zip file at all and the reader refuses it; no part of it is recoverable"
+      },
+      "generator": "generate_corpus.py::build_docx_corrupt_truncated",
+      "notes": "The central directory is gone, which is what a truncated download looks like."
+    },
+    {
+      "id": "docx-corrupt-malformed-xml",
+      "path": "docx-corrupt-malformed-xml.docx",
+      "kind": "docx-corrupt",
+      "exercises": "a package whose word/document.xml is malformed XML",
+      "sha256": "71d44b54e9df9b649788e5e312ec821b60c37894ff11e2068f7c42907748864f",
+      "expected": {
+        "read": "unsupported",
+        "display": "not-applicable",
+        "edit": "not-applicable",
+        "preserve": "not-applicable",
+        "export": "not-applicable",
+        "limitation": "the document part is not well-formed XML, so the package cannot be parsed and the reader refuses it"
+      },
+      "generator": "generate_corpus.py::build_docx_corrupt_malformed_xml",
+      "notes": "The archive is intact; only the document part is broken. This is the failure a repair path would have to recover from."
+    },
+    {
+      "id": "legacy-word-doc",
+      "path": "legacy-word-doc.doc",
+      "kind": "not-docx",
+      "exercises": "a legacy Word 97-2003 binary file",
+      "sha256": "5ce57934c8abb7df10d789feb5dc7440b5dea56a8c0c736bf7ee64a312b3808c",
+      "expected": {
+        "read": "unsupported",
+        "display": "not-applicable",
+        "edit": "not-applicable",
+        "preserve": "not-applicable",
+        "export": "not-applicable",
+        "limitation": "a legacy Word 97-2003 binary file; the tree holds no conversion path, so the reader refuses it"
+      },
+      "generator": "generate_corpus.py::build_legacy_word_doc",
+      "notes": "The compound file header and a directory entry naming a WordDocument stream: the shape of the legacy format, and not a complete Word document."
+    },
+    {
+      "id": "renamed-docx",
+      "path": "renamed.txt",
+      "kind": "not-docx",
+      "exercises": "a Word package under a .txt name",
+      "sha256": "80d1fa53aa219f77b13080995ef06a2351f9738cdfa267438a7e56724d685a6b",
+      "expected": {
+        "read": "read",
+        "display": "not-applicable",
+        "edit": "not-applicable",
+        "preserve": "not-applicable",
+        "export": "not-applicable",
+        "limitation": "the reader goes by the package's parts and not by the extension, so a renamed package is still read"
+      },
+      "generator": "generate_corpus.py::build_docx_minimal",
+      "notes": "The very bytes of docx-minimal.docx under another name: the extension is the only thing that differs."
+    },
+    {
+      "id": "plain-text",
+      "path": "plain-text.txt",
+      "kind": "not-docx",
+      "exercises": "a plain text file",
+      "sha256": "bc3bfe7e9385edbe83e7e4bed7dbb0e3562cac9232cb6b5efa809b3f0bbfb86e",
+      "expected": {
+        "read": "unsupported",
+        "display": "not-applicable",
+        "edit": "not-applicable",
+        "preserve": "not-applicable",
+        "export": "not-applicable",
+        "limitation": "plain text is not a Word package, so the reader refuses it"
+      },
+      "generator": "generate_corpus.py::build_plain_text",
+      "notes": "The control case: a file that was never a package."
+    },
+    {
+      "id": "vault",
+      "path": "vault",
+      "kind": "vault",
+      "exercises": "a vault of notes with frontmatter, wiki-links and a non-ASCII name",
+      "sha256": "d83b6fc0b528d3b549cfc6720cb591c317118d8874134aaf9818cf8c4ddaf17b",
+      "expected": {
+        "read": "read",
+        "display": "not-applicable",
+        "edit": "not-applicable",
+        "preserve": "not-applicable",
+        "export": "not-applicable",
+        "limitation": "the notes are listed and read; editing, renaming, the backlink index and the search order are not measured here"
+      },
+      "generator": "generate_corpus.py::build_vault",
+      "notes": "The vault tree. Its digest covers the whole tree, so a note that changes changes this entry."
+    },
+    {
+      "id": "vault-note-index",
+      "path": "vault/index.md",
+      "kind": "vault-note",
+      "exercises": "frontmatter, a wiki-link and a link to a note that does not exist",
+      "sha256": "441dd46dcf9725783e2287855b84bdd560000af57f122ccfca6f3c5c59f1b81e",
+      "expected": {
+        "read": "read",
+        "display": "not-applicable",
+        "edit": "not-applicable",
+        "preserve": "not-applicable",
+        "export": "not-applicable",
+        "limitation": "the frontmatter title, the tags and both wiki-links are read; the link to the note that does not exist is kept as an unresolved link"
+      },
+      "generator": "generate_corpus.py::build_vault",
+      "notes": "The index note. Its title comes from the frontmatter, because it does not open with a heading."
+    },
+    {
+      "id": "vault-note-non-ascii",
+      "path": "vault/notes/日本語.md",
+      "kind": "vault-note",
+      "exercises": "a note whose name is not ASCII",
+      "sha256": "0cb97f72daef1c6927f522571ecee3d6b3c47da4027b6db9383d1f750914b7cc",
+      "expected": {
+        "read": "read",
+        "display": "not-applicable",
+        "edit": "not-applicable",
+        "preserve": "not-applicable",
+        "export": "not-applicable",
+        "limitation": "a non-ASCII file name and a CJK body are read; nothing normalises the name"
+      },
+      "generator": "generate_corpus.py::build_vault",
+      "notes": "The name is the test: a vault rule that assumed ASCII would refuse this note."
+    },
+    {
+      "id": "vault-note-bom",
+      "path": "vault/notes/bom.md",
+      "kind": "vault-note",
+      "exercises": "a note that starts with a UTF-8 byte order mark",
+      "sha256": "9e5b70a637af92adf9f7ea8ef7203312aba09e413efeb778bfc0bcf188cc8f0a",
+      "expected": {
+        "read": "limited",
+        "display": "not-applicable",
+        "edit": "not-applicable",
+        "preserve": "not-applicable",
+        "export": "not-applicable",
+        "limitation": "the note is read, but the byte order mark is not stripped, so its frontmatter is not recognised, its frontmatter tags are lost and its title falls back to its heading"
+      },
+      "generator": "generate_corpus.py::build_vault",
+      "notes": "The file carries a UTF-8 BOM before its frontmatter fence."
+    },
+    {
+      "id": "notebook",
+      "path": "notebook/research-notebook/manifest.json",
+      "kind": "notebook",
+      "exercises": "a notebook manifest with sources and a note membership",
+      "sha256": "2c7d6f625b1a701ad439e057418d3b37dc1cd07350cf8452852a8c29345f6791",
+      "expected": {
+        "read": "read",
+        "display": "not-applicable",
+        "edit": "not-applicable",
+        "preserve": "not-applicable",
+        "export": "not-applicable",
+        "limitation": "the manifest is read as a notebook with its sources and its note membership; the sources and the notes themselves are the operator's and are not read here"
+      },
+      "generator": "generate_corpus.py::build_notebook",
+      "notes": "The notebook names three sources and three vault notes, so the membership has to resolve against the vault."
+    }
+  ]
+}

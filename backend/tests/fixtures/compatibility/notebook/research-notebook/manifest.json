@@ -1,0 +1,17 @@
+{
+  "notebook_id": "research-notebook",
+  "title": "Compatibility Research Notebook",
+  "description": "A notebook of the compatibility corpus.",
+  "source_ids": [
+    "src-corpus-001",
+    "src-corpus-002",
+    "src-corpus-003"
+  ],
+  "note_ids": [
+    "index",
+    "notes/日本語",
+    "notes/bom"
+  ],
+  "created_at": "2026-01-02T03:04:05.000000Z",
+  "modified_at": "2026-01-02T03:04:05.000000Z"
+}
