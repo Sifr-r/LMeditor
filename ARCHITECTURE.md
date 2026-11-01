@@ -4819,14 +4819,14 @@ handoff checks can be reproduced from a clean checkout.
 
 **Superseded by §31.** The "no hosted CI run" statement above describes the
 state on 2026-10-28 and is no longer true: the workflow ran on hosted Windows
-and Linux runners on 2026-11-01 and found three real defects. The claim about
+and Linux runners on 2026-11-01 and found four real defects. The claim about
 deployment and publishing is unchanged.
 
 ## 31. The hosted CI runs -- 2026-11-01
 
 Section 30.3 said that no hosted CI run was claimed. That is superseded.
 The workflow ran on hosted Windows and Linux runners for the first time,
-against the branch that carries the tier migration. It found three defects
+against the branch that carries the tier migration. It found four defects
 that the local Windows runs could not, one per run, and every one of them
 was real.
 
@@ -4842,12 +4842,16 @@ failed, each for its own reason.
 
 The local runs had been on CPython 3.13.9 and on Windows only. The hosted
 runners were CPython 3.13.16 on Windows and 3.13.17 on Linux. That
-difference is what the next three sections are about.
+difference is what the next sections are about.
 
 The second run is pull request 2, run 41297804342. The Windows runner
 passed the whole gate. The Linux runner got further -- the Kotlin evidence
 check accepted the declared skip -- and then failed its type check, which
-is the third defect below.
+is the third defect below. The third run reached the backend suite on
+Linux, where one fixture test failed, which is the fourth defect below.
+
+Each defect was found by a different runner because each defect was only
+reachable from the platform that had never run the gate before.
 
 ### 31.2 The witness and the standard library
 
@@ -4940,7 +4944,40 @@ This defect was in the gate before the hosted runs. It was never visible
 because the gate had never run on a platform that was not the one it was
 written on.
 
-### 31.5 Evidence
+### 31.5 The fixture and the compressor
+
+The Linux runner then failed one backend test:
+`test_the_committed_fixture_is_the_ragged_merge_region_package`. The
+committed fixture and the builder's output are the same document, and they
+are not the same bytes.
+
+The difference is inside the DEFLATE stream, not inside the document: the
+first differing byte was at offset 2714 of 3242, and it was `\x00` against
+`\x03` -- compressor output, not XML. A DEFLATE stream is the output of
+the compressor that produced it, and the stock zlib and the zlib-ng a
+Linux runner links against do not produce the same stream for the same
+input. The test asserted on the compressed bytes, so it could only pass
+where the two compressors agree.
+
+The fixture itself was never wrong. Its members, their order, their
+metadata and their contents are the same on every platform: the names are
+literals, the timestamp is `_FIXED_TIMESTAMP`, the compression method and
+the external attributes are constants, and each payload is a literal string
+encoded as UTF-8. Only the compressed form varies.
+
+The comparison is now over the members -- their names, their order, their
+metadata and their contents -- and not over the bytes. The drift the test
+guards against is still caught: a change to the builder's body, to a part's
+name, to the member order or to the timestamp all fail it. What it no
+longer asserts is that two compressors agree.
+
+The parity harness already refused to compare two written packages byte for
+byte, for this reason and one more -- two different writers lay the same
+document out differently -- and reads each package back to compare the
+documents. This test was the one place that still compared compressed
+bytes.
+
+### 31.6 Evidence
 
 The repaired gate was run against the artifacts the first hosted run
 retained. Both are accepted: the Linux evidence with its one declared and
@@ -4952,7 +4989,7 @@ failures and no skips, strict mypy over **134 source files** for both
 platforms, **26** parity comparisons agreed with none disagreed, and the live
 HTTP document round trip.
 
-### 31.6 What this does not change
+### 31.7 What this does not change
 
 The hosted runs are now a fact, but they are not a release verdict. The
 §29.6 and §30 findings are untouched by them: the API still accepts

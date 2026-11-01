@@ -75,11 +75,14 @@ nothing had declared, and the Windows runner caught a collision between the
 frozen web witness and a `html.parser` internal that CPython introduced in
 3.13.16. The second run passed on Windows and failed on Linux in the gate's
 own type check, which followed the host platform rather than the platform
-being targeted. All three defects are described in `ARCHITECTURE.md` §31 and
-repaired. The gate now type-checks for both `linux` and `win32` on every
-runner, so a branch only one platform can reach is checked rather than
-assumed. macOS and Python 3.12 have not been exercised by this matrix, and the
-repairs are not yet proven by a green hosted run.
+being targeted. The third run reached the backend suite on Linux and failed a
+fixture test that compared a package's compressed bytes rather than its
+members -- a DEFLATE stream is the compressor's output, and stock zlib and
+zlib-ng do not produce the same one. All four defects are described in
+`ARCHITECTURE.md` §31 and repaired. The gate now type-checks for both `linux`
+and `win32` on every runner, so a branch only one platform can reach is
+checked rather than assumed. macOS and Python 3.12 have not been exercised by
+this matrix, and the repairs are not yet proven by a green hosted run.
 
 ## Remaining release work, in order
 
