@@ -54,6 +54,7 @@ jobs:
           path: |
             build/release/run-*/*.log
             build/release/run-*/external-checks.json
+            build/release/run-*/platform-checks.json
             build/release/run-*/pytest.xml
             build/release/run-*/kotlin-junit/**/*.xml
             kotlin/*/build/test-results/test/TEST-*.xml
