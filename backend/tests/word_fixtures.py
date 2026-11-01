@@ -239,6 +239,33 @@ def _zip(parts: list[tuple[str, str]]) -> bytes:
     return buffer.getvalue()
 
 
+def package_members(package: bytes) -> list[tuple[str, tuple[object, ...], bytes]]:
+    """Return a package's members: their names, their metadata and their contents.
+
+    The *compressed* bytes are deliberately not part of this. A DEFLATE
+    stream is the output of the compressor that produced it, and two zlib
+    implementations -- the stock zlib and the zlib-ng a Linux runner links
+    against -- do not produce the same stream for the same input. What a
+    package holds is its members, their order, their metadata and their
+    contents; those are the same on every platform, and they are what two
+    packages are compared on.
+
+    The parity harness already refuses to compare two written packages byte
+    for byte for the same reason, and for one more: two different writers
+    lay the same document out differently. It reads each package back and
+    compares the documents.
+    """
+    with zipfile.ZipFile(BytesIO(package)) as archive:
+        return [
+            (
+                info.filename,
+                (info.date_time, info.compress_type, info.external_attr),
+                archive.read(info.filename),
+            )
+            for info in archive.infolist()
+        ]
+
+
 # ============================================================================
 # Targeted packages for the contract clauses the main fixture does not reach
 # ============================================================================

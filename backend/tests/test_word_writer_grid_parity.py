@@ -350,7 +350,16 @@ def test_the_committed_fixture_is_the_ragged_merge_region_package() -> None:
 
     The fixture is a file on disk, so the parity harness can read it; the
     builder is the source of truth, so the two cannot drift apart silently.
-    """
-    from tests.word_fixtures import build_merge_region_package
 
-    assert FIXTURE.read_bytes() == build_merge_region_package()
+    The comparison is over the package's members -- their names, their
+    order, their metadata and their contents -- and not over its bytes. A
+    DEFLATE stream is the output of the compressor that produced it, and
+    the stock zlib and the zlib-ng a Linux runner links against do not
+    produce the same stream for the same input. The two packages hold the
+    same document on every platform; the compressed form is not the same
+    bytes, so asserting on it made this test fail on Linux for a reason
+    that had nothing to do with the document.
+    """
+    from tests.word_fixtures import build_merge_region_package, package_members
+
+    assert package_members(FIXTURE.read_bytes()) == package_members(build_merge_region_package())
