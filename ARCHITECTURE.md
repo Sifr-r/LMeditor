@@ -4989,6 +4989,30 @@ failures and no skips, strict mypy over **134 source files** for both
 platforms, **26** parity comparisons agreed with none disagreed, and the live
 HTTP document round trip.
 
+The fourth hosted run, `Sifr-r/LMeditor` pull request 2, run 41299656645,
+**passed on both runners**. Every step succeeded on Windows and on Linux:
+the clean locked install, the Kotlin build and tests, the strict type check
+for both platforms, the portable backend suite, the parity comparison and
+the live HTTP round trip.
+
+| | Windows | Linux |
+| --- | --- | --- |
+| Kotlin tests | 1,059 | 1,059 |
+| Kotlin failures / errors | 0 / 0 | 0 / 0 |
+| Kotlin skips | 0 | 1 (declared) |
+| Backend tests | 1,695 passed | 1,695 passed |
+| Python deselected | 5 | 5 |
+
+The two runs differ by exactly one skip, and that skip is the Windows-only
+file-lock guarantee, declared in `platform-checks.json` for Linux and
+observed in the run. Both runs retained their effective declaration beside
+`external-checks.json`, so the exclusions are visible in the artifact rather
+than implicit in the source.
+
+This is a hosted pass of the candidate gate on two platforms. It is not a
+release verdict, and it is not a production readiness claim; §31.7 says what
+is still open.
+
 ### 31.7 What this does not change
 
 The hosted runs are now a fact, but they are not a release verdict. The

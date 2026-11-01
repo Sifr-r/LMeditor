@@ -66,23 +66,21 @@ and runs the gate in portable mode on Windows and Linux. It grants read-only rep
 access, does not retain checkout credentials, and uploads logs and test reports
 even when a check fails. It does not deploy or publish anything.
 
-The workflow ran on hosted Windows and Linux runners on 2026-11-01, against
-`Sifr-r/LMeditor` pull requests 1 and 2. Both runners installed the locked
-environment cleanly, built the tier and ran the same 1,059 Kotlin tests across
-15 modules. The first run then failed on both runners, each for a different
-real reason: the Linux runner refused a platform-conditional Kotlin skip that
-nothing had declared, and the Windows runner caught a collision between the
-frozen web witness and a `html.parser` internal that CPython introduced in
-3.13.16. The second run passed on Windows and failed on Linux in the gate's
-own type check, which followed the host platform rather than the platform
-being targeted. The third run reached the backend suite on Linux and failed a
-fixture test that compared a package's compressed bytes rather than its
-members -- a DEFLATE stream is the compressor's output, and stock zlib and
-zlib-ng do not produce the same one. All four defects are described in
-`ARCHITECTURE.md` §31 and repaired. The gate now type-checks for both `linux`
-and `win32` on every runner, so a branch only one platform can reach is
-checked rather than assumed. macOS and Python 3.12 have not been exercised by
-this matrix, and the repairs are not yet proven by a green hosted run.
+The fourth hosted run, `Sifr-r/LMeditor` pull request 2, run 41299656645,
+**passed on both runners**: the clean locked install, the Kotlin build and
+tests, the strict type check for both platforms, the portable backend suite,
+the parity comparison and the live HTTP round trip. Windows and Linux agree
+on **1,059 Kotlin tests** and **1,695 backend tests**; they differ by
+exactly one skip, the Windows-only file-lock guarantee, which
+`platform-checks.json` declares for Linux and the run observed. Both runs
+retained their effective declaration beside `external-checks.json`.
+
+This is a hosted pass of the candidate gate on two platforms. It is not a
+production readiness claim, and the release findings below are untouched by
+it: the API still accepts unauthenticated callers, the live SSE subscriber
+queues are still unbounded, the installed-wheel deployment is still
+unproven, and the desktop accessibility evidence is still missing. macOS
+and Python 3.12 have not been exercised by this matrix.
 
 ## Remaining release work, in order
 
