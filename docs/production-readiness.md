@@ -39,6 +39,14 @@ the offline model double. It does not contact a live language-model provider.
 It refuses missing XML, zero tests, inconsistent counts, failures, errors and
 skips. Module reports must exist for every declared Kotlin module.
 
+A skip is refused unless `backend/platform-checks.json` declares it, by class
+and by test name, for the platform the gate is running on. A test that asserts
+a guarantee only one platform gives cannot run on the others, so it declares
+an assumption and skips elsewhere; the declaration names exactly those. The
+gate also refuses a declared skip that did not happen, so the declaration
+cannot rot into a licence to skip anything. The effective declaration is
+copied into the run evidence beside `external-checks.json`.
+
 `--portable` runs the automated checks suitable for hosted CI. It explicitly
 excludes the three Microsoft Word conformance modules and five exact tests requiring
 real semantic/NLI model weights, recording their addresses in
@@ -58,10 +66,21 @@ and runs the gate in portable mode on Windows and Linux. It grants read-only rep
 access, does not retain checkout credentials, and uploads logs and test reports
 even when a check fails. It does not deploy or publish anything.
 
-The workflow is prepared locally. No hosted run has been observed and no remote
-was created. macOS and Python 3.12 have not been exercised by this matrix. Local
-verification of the existing environment does not prove a fresh installation;
-the first clean CI runs must establish that separately.
+The fourth hosted run, `Sifr-r/LMeditor` pull request 2, run 41299656645,
+**passed on both runners**: the clean locked install, the Kotlin build and
+tests, the strict type check for both platforms, the portable backend suite,
+the parity comparison and the live HTTP round trip. Windows and Linux agree
+on **1,059 Kotlin tests** and **1,695 backend tests**; they differ by
+exactly one skip, the Windows-only file-lock guarantee, which
+`platform-checks.json` declares for Linux and the run observed. Both runs
+retained their effective declaration beside `external-checks.json`.
+
+This is a hosted pass of the candidate gate on two platforms. It is not a
+production readiness claim, and the release findings below are untouched by
+it: the API still accepts unauthenticated callers, the live SSE subscriber
+queues are still unbounded, the installed-wheel deployment is still
+unproven, and the desktop accessibility evidence is still missing. macOS
+and Python 3.12 have not been exercised by this matrix.
 
 ## Remaining release work, in order
 

@@ -1,0 +1,16 @@
+{
+  "windows": {
+    "kotlin": [],
+    "python": []
+  },
+  "linux": {
+    "kotlin": [
+      {
+        "class": "lmeditor.server.SourceArchiveTest",
+        "test": "Windows mandatory file lock produces typed write failure without losing old record()",
+        "reason": "Mandatory file locks are a Windows guarantee. The tier refuses a write over a locked record only on the platform that promises it, so the test states that guarantee and skips where the guarantee does not hold. Every other Kotlin test runs on every platform."
+      }
+    ],
+    "python": []
+  }
+}

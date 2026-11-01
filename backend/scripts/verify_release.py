@@ -21,6 +21,14 @@ from typing import Mapping, Sequence
 
 
 REPO = Path(__file__).resolve().parents[2]
+PLATFORM_CHECKS = REPO / "backend" / "platform-checks.json"
+#: ``subprocess.CREATE_NEW_PROCESS_GROUP`` exists only on Windows, and POSIX
+#: rejects a non-zero ``creationflags`` outright. The gate runs on both
+#: platforms, so the flag is read defensively: it is the Windows value there
+#: and zero everywhere else. The gate's own type check is run for both
+#: platforms as well, so a branch that only one of them can reach is
+#: checked rather than assumed.
+CREATE_NEW_PROCESS_GROUP: int = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
 PORTABLE_EXCLUDED_MODULES = (
     "tests/test_word_real_word.py",
     "tests/test_word_app_conformance.py",
@@ -39,10 +47,66 @@ class ReleaseGateError(RuntimeError):
     """A required check failed or did not provide complete evidence."""
 
 
-def verify_junit(paths: Sequence[Path], label: str) -> int:
-    """Require nonempty, internally consistent JUnit evidence with no skips."""
+def platform_key() -> str:
+    """Return the key the platform declaration is filed under."""
+    if os.name == "nt":
+        return "windows"
+    if sys.platform.startswith("linux"):
+        return "linux"
+    return sys.platform
+
+
+def expected_skips(source: str) -> list[tuple[str, str]]:
+    """Return the tests the declaration says may skip on this platform.
+
+    A test that asserts a guarantee only one platform gives cannot run on
+    the others, so it declares an assumption and skips elsewhere. The gate
+    refuses every skip, so the ones that are legitimate have to be named
+    exactly -- by class and by name, and for the platform they are skipped
+    on. A platform the declaration does not describe has no expected skips
+    at all, which is the strict reading.
+    """
+    try:
+        declaration = json.loads(PLATFORM_CHECKS.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise ReleaseGateError(f"cannot read the platform declaration {PLATFORM_CHECKS}: {exc}") from exc
+    if not isinstance(declaration, dict):
+        raise ReleaseGateError(f"the platform declaration {PLATFORM_CHECKS} is not an object")
+    described = declaration.get(platform_key(), {})
+    if not isinstance(described, dict):
+        raise ReleaseGateError(f"the platform declaration {PLATFORM_CHECKS} does not describe {platform_key()!r} as an object")
+    listed = described.get(source, [])
+    if not isinstance(listed, list):
+        raise ReleaseGateError(f"the platform declaration {PLATFORM_CHECKS} does not list {source!r} as a list")
+    skips: list[tuple[str, str]] = []
+    for entry in listed:
+        if not isinstance(entry, dict) or "class" not in entry or "test" not in entry:
+            raise ReleaseGateError(f"the platform declaration {PLATFORM_CHECKS} has a malformed {source!r} entry")
+        skips.append((str(entry["class"]), str(entry["test"])))
+    return skips
+
+
+def verify_junit(
+    paths: Sequence[Path],
+    label: str,
+    expected_skips: Sequence[tuple[str, str]] = (),
+    observed_skips: set[tuple[str, str]] | None = None,
+) -> int:
+    """Require nonempty, internally consistent JUnit evidence with no undeclared skips.
+
+    ``expected_skips`` names the tests that are allowed to be skipped on this
+    platform, each as a ``(classname, test name)`` pair. A skip that is not
+    declared is a failure: the gate refuses evidence that quietly did less
+    than it claims. A declared skip that did not happen is a failure too, and
+    ``verify_expected_skips`` reports it -- a declaration has to be true of
+    the run it is attached to, or it is a licence to skip nothing at all.
+
+    ``observed_skips`` collects the skips that were actually seen, so a
+    caller that checks several reports can prove the whole set at the end.
+    """
     if not paths:
         raise ReleaseGateError(f"{label}: no JUnit reports were produced")
+    declared = set(expected_skips)
     total = 0
     for path in paths:
         try:
@@ -52,11 +116,27 @@ def verify_junit(paths: Sequence[Path], label: str) -> int:
         summaries = [node for node in root.iter() if node.tag in ("testsuite", "testsuites")]
         for summary in summaries:
             try:
-                incomplete = any(int(summary.get(name, "0")) != 0 for name in ("failures", "errors", "skipped"))
+                counts = {
+                    name: int(summary.get(name, "0"))
+                    for name in ("failures", "errors", "skipped")
+                }
             except ValueError as exc:
                 raise ReleaseGateError(f"{label}: {path} has invalid summary counts") from exc
-            if incomplete:
-                raise ReleaseGateError(f"{label}: {path} reports failed, errored or skipped tests")
+            if any(value < 0 for value in counts.values()):
+                raise ReleaseGateError(f"{label}: {path} has negative test counts")
+            if counts["failures"] or counts["errors"]:
+                raise ReleaseGateError(f"{label}: {path} reports failed or errored tests")
+            skipped_cases = [case for case in summary.iter("testcase") if case.find("skipped") is not None]
+            if counts["skipped"] != len(skipped_cases):
+                raise ReleaseGateError(f"{label}: {path} reports inconsistent skipped counts")
+            for case in skipped_cases:
+                identity = (case.get("classname") or "", case.get("name") or "")
+                if identity not in declared:
+                    raise ReleaseGateError(
+                        f"{label}: {path} reports an undeclared skipped test: {identity[0]}.{identity[1]}"
+                    )
+                if observed_skips is not None:
+                    observed_skips.add(identity)
         suites = [node for node in root.iter("testsuite") if not node.findall("testsuite")]
         if not suites:
             raise ReleaseGateError(f"{label}: {path} contains no test suites")
@@ -73,14 +153,29 @@ def verify_junit(paths: Sequence[Path], label: str) -> int:
                 raise ReleaseGateError(f"{label}: {path} has zero or inconsistent test counts")
             if any(value < 0 for value in counts.values()):
                 raise ReleaseGateError(f"{label}: {path} has negative test counts")
-            if any(counts[name] for name in ("failures", "errors", "skipped")) or any(
+            if counts["failures"] or counts["errors"]:
+                raise ReleaseGateError(f"{label}: {path} reports failed or errored tests")
+            if any(
                 case.find(name) is not None
                 for case in cases
-                for name in ("failure", "error", "skipped")
+                for name in ("failure", "error")
             ):
-                raise ReleaseGateError(f"{label}: {path} reports failed, errored or skipped tests")
+                raise ReleaseGateError(f"{label}: {path} reports failed or errored tests")
             total += len(cases)
     return total
+
+
+def verify_expected_skips(
+    declared: Sequence[tuple[str, str]],
+    observed: set[tuple[str, str]],
+    label: str,
+) -> None:
+    """Require every declared skip to have happened in the run that declared it."""
+    missing = sorted(set(declared) - set(observed))
+    if missing:
+        raise ReleaseGateError(
+            f"{label}: declares an expected skip that did not happen: {missing[0][0]}.{missing[0][1]}"
+        )
 
 
 def run_check(
@@ -102,7 +197,7 @@ def run_check(
                 stdout=stream,
                 stderr=subprocess.STDOUT,
                 start_new_session=sys.platform != "win32",
-                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0,
+                creationflags=CREATE_NEW_PROCESS_GROUP,
             )
             try:
                 returncode = process.wait(timeout=timeout)
@@ -202,6 +297,20 @@ def verify_release(*, offline: bool, timeout: int, portable: bool = False) -> Pa
     run_dir = Path(tempfile.mkdtemp(prefix="run-", dir=report_root))
     environment = release_environment(run_dir, portable=portable)
     backend_command = pytest_command(run_dir, portable=portable)
+    kotlin_skips = expected_skips("kotlin")
+    python_skips = expected_skips("python")
+    (run_dir / "platform-checks.json").write_text(
+        json.dumps(
+            {
+                "platform": platform_key(),
+                "kotlin": [{"class": name, "test": test} for name, test in kotlin_skips],
+                "python": [{"class": name, "test": test} for name, test in python_skips],
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     print(f"Release evidence: {run_dir}", flush=True)
     if portable:
         print("Portable scope excludes Microsoft Word and five real-model checks; see external-checks.json. Passing does not establish full release readiness.", flush=True)
@@ -214,23 +323,46 @@ def verify_release(*, offline: bool, timeout: int, portable: bool = False) -> Pa
         gradle.append("--offline")
     run_check("Kotlin build and tests", gradle, kotlin, environment, run_dir / "kotlin.log", timeout)
     kotlin_reports = run_dir / "kotlin-junit"
+    observed_kotlin_skips: set[tuple[str, str]] = set()
     for module in modules:
         reports = sorted((kotlin / module / "build" / "test-results" / "test").glob("TEST-*.xml"))
-        count = verify_junit(reports, f"Kotlin {module}")
+        count = verify_junit(reports, f"Kotlin {module}", kotlin_skips, observed_kotlin_skips)
         destination = kotlin_reports / module
         destination.mkdir(parents=True)
         for report in reports:
             shutil.copy2(report, destination / report.name)
         print(f"Kotlin {module}: {count} tests passed", flush=True)
+    verify_expected_skips(kotlin_skips, observed_kotlin_skips, "Kotlin")
     tier_jars = list((kotlin / "bridge" / "build" / "libs").glob("*-tier.jar"))
     if len(tier_jars) != 1:
         raise ReleaseGateError("Kotlin build must produce exactly one self-contained tier jar")
     environment["LMEDITOR_KOTLIN_BRIDGE"] = str(tier_jars[0])
     python = sys.executable
-    run_check("strict Python typing", [python, "-m", "mypy", "--strict", "src", "scripts/verify_release.py", "--cache-dir", str(run_dir / "mypy-cache")], backend, environment, run_dir / "mypy.log", timeout)
+    for target_platform in ("linux", "win32"):
+        run_check(
+            f"strict Python typing ({target_platform})",
+            [
+                python,
+                "-m",
+                "mypy",
+                "--strict",
+                "--platform",
+                target_platform,
+                "src",
+                "scripts/verify_release.py",
+                "--cache-dir",
+                str(run_dir / "mypy-cache"),
+            ],
+            backend,
+            environment,
+            run_dir / f"mypy-{target_platform}.log",
+            timeout,
+        )
     pytest_report = run_dir / "pytest.xml"
     run_check("portable backend suite" if portable else "complete backend suite", backend_command, backend, environment, run_dir / "pytest.log", timeout)
-    print(f"Backend: {verify_junit([pytest_report], 'backend')} tests passed", flush=True)
+    observed_python_skips: set[tuple[str, str]] = set()
+    print(f"Backend: {verify_junit([pytest_report], 'backend', python_skips, observed_python_skips)} tests passed", flush=True)
+    verify_expected_skips(python_skips, observed_python_skips, "backend")
     for label, script in (
         ("Kotlin parity", "verify_kotlin_parity.py"),
         ("HTTP document round trip", "verify_documents_roundtrip.py"),

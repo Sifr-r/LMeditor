@@ -4816,3 +4816,210 @@ findings remain open. The generators and four auxiliary documentation checkers
 under ignored `.tools/` still need promotion to maintained source before all old
 handoff checks can be reproduced from a clean checkout.
 - The rebinding case was not demonstrated against a live browser.
+
+**Superseded by §31.** The "no hosted CI run" statement above describes the
+state on 2026-10-28 and is no longer true: the workflow ran on hosted Windows
+and Linux runners on 2026-11-01 and found four real defects. The claim about
+deployment and publishing is unchanged.
+
+## 31. The hosted CI runs -- 2026-11-01
+
+Section 30.3 said that no hosted CI run was claimed. That is superseded.
+The workflow ran on hosted Windows and Linux runners for the first time,
+against the branch that carries the tier migration. It found four defects
+that the local Windows runs could not, one per run, and every one of them
+was real.
+
+### 31.1 What the hosted runs established
+
+The first run is `Sifr-r/LMeditor` pull request 1, run 41295655441. On both
+runners the locked installation succeeded on a clean checkout, the Kotlin
+build produced the same **1,059 tests across 15 modules**, and strict
+Python typing passed on the Windows runner. The gate's own machinery
+worked: the process tree was bounded, the evidence was retained as an
+artifact, and the failure was reported rather than swallowed. Both runners
+failed, each for its own reason.
+
+The local runs had been on CPython 3.13.9 and on Windows only. The hosted
+runners were CPython 3.13.16 on Windows and 3.13.17 on Linux. That
+difference is what the next sections are about.
+
+The second run is pull request 2, run 41297804342. The Windows runner
+passed the whole gate. The Linux runner got further -- the Kotlin evidence
+check accepted the declared skip -- and then failed its type check, which
+is the third defect below. The third run reached the backend suite on
+Linux, where one fixture test failed, which is the fourth defect below.
+
+Each defect was found by a different runner because each defect was only
+reachable from the platform that had never run the gate before.
+
+### 31.2 The witness and the standard library
+
+The Windows runner failed the parity check *the web evidence*: the Python
+witness found one result in the page and the Kotlin tier found two. The
+harness reported 25 agreed and 1 disagreed, and the stderr carried
+`Could not parse the search response: can only join an iterable`.
+
+CPython gave `html.parser.HTMLParser` an internal `_pending` buffer in
+3.13.16 and 3.14.6, and joins that buffer in `close()`. The frozen witness
+`_DuckDuckGoResultParser` keeps its own state under that same name: the
+result that is waiting for its snippet. A subclass that shadows the name
+replaces the stdlib's buffer with its own state, and `close()` then joins
+the subclass's state, which is not iterable. The parse died with
+`TypeError: can only join an iterable` -- after the first result had
+already been recorded, so the page yielded one result and lost the second.
+
+The witness caught that exception and returned what it had, which is why
+the failure was a disagreement about a count and not a crash.
+
+Reproduced under CPython 3.12.13, 3.13.9, 3.13.13 and 3.14.5 the witness
+finds two results; under 3.14.7 it finds one and raises. The local
+environment is 3.13.9, so every local run agreed with Kotlin and the
+divergence was invisible until a runner used a newer interpreter.
+
+The repair renames the witness's attribute to `_pending_result`. The rule
+the witness states does not change: it produces the two results it has
+always produced, on every supported interpreter. Only the name of a
+private attribute moved, so the rule survives a change in the standard
+library it never depended on. The witness is not rewritten to follow
+Kotlin -- it is restored to the behaviour it always had.
+
+`test_the_frozen_web_parser_keeps_every_result_it_finds` pins that count
+directly, so a future change in the standard library is caught by a unit
+test rather than by the parity harness, where it costs a Kotlin build to
+see.
+
+### 31.3 The gate and a platform guarantee
+
+The Linux runner failed earlier, in the Kotlin evidence check. The gate
+refuses every skipped test, and one Kotlin test skips on Linux.
+
+`SourceArchiveTest`'s *Windows mandatory file lock produces typed write
+failure without losing old record* asserts a guarantee only Windows gives:
+the tier refuses a write over a locked record only where the lock is
+mandatory. The test states that assumption and skips where the guarantee
+does not hold. The gate's zero-skip rule rejected the skip, so the gate
+could never pass on the Linux runner the workflow declares. The rule was
+total where it had to be scoped.
+
+Across all 15 Kotlin modules on the hosted Linux runner there was exactly
+one skip; on the Windows runner there were none.
+
+The repair scopes the rule rather than dropping it.
+`backend/platform-checks.json` is a checked-in declaration of the tests
+that may skip, per platform, named exactly by class and test name. The gate
+still refuses every skip it has not been told about, and it now also
+refuses a declaration that did not happen -- so a platform cannot declare
+a skip and then not have it, and the declaration cannot rot unnoticed. The
+effective declaration is copied into the run evidence beside
+`external-checks.json`, so the exclusions are visible in the artifact
+rather than implicit in the source.
+
+Both behaviours are covered by fault injection in `test_release_gate.py`:
+an undeclared skip is rejected, a declared skip that happened is accepted,
+and a declared skip that did not happen is rejected.
+
+### 31.4 The type check and the host platform
+
+The Linux runner then failed its strict Python type check, on the gate's own
+source: `Module has no attribute "CREATE_NEW_PROCESS_GROUP"`.
+
+The gate starts every check in its own process group so that a timeout can
+terminate the check's whole tree. On Windows that is
+`subprocess.CREATE_NEW_PROCESS_GROUP`; on POSIX the flag does not exist and
+the group is created with `start_new_session` instead. The code was correct
+at runtime on both platforms -- the conditional expression never evaluates
+the attribute on POSIX -- but `mypy` checks the attribute rather than the
+branch, and mypy's default platform is the host it runs on. The gate was
+written on Windows, so the check passed there and could not pass on Linux.
+
+A gate that runs on both platforms has to type-check for both. The flag is
+now read through `getattr`, which is the Windows value there and zero
+everywhere else, and the gate runs its own type check twice: once with
+`--platform linux` and once with `--platform win32`. A branch that only one
+of the two can reach is now checked rather than assumed, and the defect
+that this section describes could not have passed the gate on either runner.
+
+This defect was in the gate before the hosted runs. It was never visible
+because the gate had never run on a platform that was not the one it was
+written on.
+
+### 31.5 The fixture and the compressor
+
+The Linux runner then failed one backend test:
+`test_the_committed_fixture_is_the_ragged_merge_region_package`. The
+committed fixture and the builder's output are the same document, and they
+are not the same bytes.
+
+The difference is inside the DEFLATE stream, not inside the document: the
+first differing byte was at offset 2714 of 3242, and it was `\x00` against
+`\x03` -- compressor output, not XML. A DEFLATE stream is the output of
+the compressor that produced it, and the stock zlib and the zlib-ng a
+Linux runner links against do not produce the same stream for the same
+input. The test asserted on the compressed bytes, so it could only pass
+where the two compressors agree.
+
+The fixture itself was never wrong. Its members, their order, their
+metadata and their contents are the same on every platform: the names are
+literals, the timestamp is `_FIXED_TIMESTAMP`, the compression method and
+the external attributes are constants, and each payload is a literal string
+encoded as UTF-8. Only the compressed form varies.
+
+The comparison is now over the members -- their names, their order, their
+metadata and their contents -- and not over the bytes. The drift the test
+guards against is still caught: a change to the builder's body, to a part's
+name, to the member order or to the timestamp all fail it. What it no
+longer asserts is that two compressors agree.
+
+The parity harness already refused to compare two written packages byte for
+byte, for this reason and one more -- two different writers lay the same
+document out differently -- and reads each package back to compare the
+documents. This test was the one place that still compared compressed
+bytes.
+
+### 31.6 Evidence
+
+The repaired gate was run against the artifacts the first hosted run
+retained. Both are accepted: the Linux evidence with its one declared and
+observed skip, and the Windows evidence with none, **1,059 tests** each.
+
+A full local portable gate run then passed end to end: **1,059 Kotlin tests**
+across all 15 modules, **1,695 backend tests** in portable mode with no
+failures and no skips, strict mypy over **134 source files** for both
+platforms, **26** parity comparisons agreed with none disagreed, and the live
+HTTP document round trip.
+
+The fourth hosted run, `Sifr-r/LMeditor` pull request 2, run 41299656645,
+**passed on both runners**. Every step succeeded on Windows and on Linux:
+the clean locked install, the Kotlin build and tests, the strict type check
+for both platforms, the portable backend suite, the parity comparison and
+the live HTTP round trip.
+
+| | Windows | Linux |
+| --- | --- | --- |
+| Kotlin tests | 1,059 | 1,059 |
+| Kotlin failures / errors | 0 / 0 | 0 / 0 |
+| Kotlin skips | 0 | 1 (declared) |
+| Backend tests | 1,695 passed | 1,695 passed |
+| Python deselected | 5 | 5 |
+
+The two runs differ by exactly one skip, and that skip is the Windows-only
+file-lock guarantee, declared in `platform-checks.json` for Linux and
+observed in the run. Both runs retained their effective declaration beside
+`external-checks.json`, so the exclusions are visible in the artifact rather
+than implicit in the source.
+
+This is a hosted pass of the candidate gate on two platforms. It is not a
+release verdict, and it is not a production readiness claim; §31.7 says what
+is still open.
+
+### 31.7 What this does not change
+
+The hosted runs are now a fact, but they are not a release verdict. The
+§29.6 and §30 findings are untouched by them: the API still accepts
+unauthenticated callers, workflow approval is still unauthenticated, the
+live SSE subscriber queues are still unbounded, the installed-wheel
+deployment is still unproven, and the desktop accessibility evidence is
+still missing. The gate was made able to run on the platforms it
+declares; it was not made to certify a product that is not ready.
+
