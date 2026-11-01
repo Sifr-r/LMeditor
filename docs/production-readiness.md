@@ -67,16 +67,19 @@ access, does not retain checkout credentials, and uploads logs and test reports
 even when a check fails. It does not deploy or publish anything.
 
 The workflow ran on hosted Windows and Linux runners on 2026-11-01, against
-`Sifr-r/LMeditor` pull request 1. Both runners installed the locked
+`Sifr-r/LMeditor` pull requests 1 and 2. Both runners installed the locked
 environment cleanly, built the tier and ran the same 1,059 Kotlin tests across
-15 modules, and passed strict Python typing. The run then failed on both
-runners, each for a different real reason: the Linux runner refused a
-platform-conditional Kotlin skip that nothing had declared, and the Windows
-runner caught a collision between the frozen web witness and a `html.parser`
-internal that CPython introduced in 3.13.16. Both defects are described in
-`ARCHITECTURE.md` §31 and repaired. macOS and Python 3.12 have not been
-exercised by this matrix, and the repairs are not yet proven by a second
-hosted run.
+15 modules. The first run then failed on both runners, each for a different
+real reason: the Linux runner refused a platform-conditional Kotlin skip that
+nothing had declared, and the Windows runner caught a collision between the
+frozen web witness and a `html.parser` internal that CPython introduced in
+3.13.16. The second run passed on Windows and failed on Linux in the gate's
+own type check, which followed the host platform rather than the platform
+being targeted. All three defects are described in `ARCHITECTURE.md` §31 and
+repaired. The gate now type-checks for both `linux` and `win32` on every
+runner, so a branch only one platform can reach is checked rather than
+assumed. macOS and Python 3.12 have not been exercised by this matrix, and the
+repairs are not yet proven by a green hosted run.
 
 ## Remaining release work, in order
 

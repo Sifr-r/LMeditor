@@ -4819,29 +4819,35 @@ handoff checks can be reproduced from a clean checkout.
 
 **Superseded by §31.** The "no hosted CI run" statement above describes the
 state on 2026-10-28 and is no longer true: the workflow ran on hosted Windows
-and Linux runners on 2026-11-01 and found two real defects. The claim about
+and Linux runners on 2026-11-01 and found three real defects. The claim about
 deployment and publishing is unchanged.
 
-## 31. The first hosted CI run -- 2026-11-01
+## 31. The hosted CI runs -- 2026-11-01
 
 Section 30.3 said that no hosted CI run was claimed. That is superseded.
 The workflow ran on hosted Windows and Linux runners for the first time,
-against the branch that carries the tier migration, and it found two
-defects that the local Windows runs could not. Both runners failed, each
-for its own reason, and both reasons were real.
+against the branch that carries the tier migration. It found three defects
+that the local Windows runs could not, one per run, and every one of them
+was real.
 
-### 31.1 What the hosted run established
+### 31.1 What the hosted runs established
 
-The run is `Sifr-r/LMeditor` pull request 1, run 41295655441. On both
+The first run is `Sifr-r/LMeditor` pull request 1, run 41295655441. On both
 runners the locked installation succeeded on a clean checkout, the Kotlin
 build produced the same **1,059 tests across 15 modules**, and strict
-Python typing passed. The gate's own machinery worked: the process tree
-was bounded, the evidence was retained as an artifact, and the failure was
-reported rather than swallowed.
+Python typing passed on the Windows runner. The gate's own machinery
+worked: the process tree was bounded, the evidence was retained as an
+artifact, and the failure was reported rather than swallowed. Both runners
+failed, each for its own reason.
 
 The local runs had been on CPython 3.13.9 and on Windows only. The hosted
-runners were CPython 3.13.16 on Windows and Linux. That difference is what
-the next two sections are about.
+runners were CPython 3.13.16 on Windows and 3.13.17 on Linux. That
+difference is what the next three sections are about.
+
+The second run is pull request 2, run 41297804342. The Windows runner
+passed the whole gate. The Linux runner got further -- the Kotlin evidence
+check accepted the declared skip -- and then failed its type check, which
+is the third defect below.
 
 ### 31.2 The witness and the standard library
 
@@ -4909,16 +4915,47 @@ Both behaviours are covered by fault injection in `test_release_gate.py`:
 an undeclared skip is rejected, a declared skip that happened is accepted,
 and a declared skip that did not happen is rejected.
 
-### 31.4 Evidence
+### 31.4 The type check and the host platform
 
-The repaired gate was run against the artifacts the hosted run retained.
-Both are accepted: the Linux evidence with its one declared and observed
-skip, and the Windows evidence with none, **1,059 tests** each.
+The Linux runner then failed its strict Python type check, on the gate's own
+source: `Module has no attribute "CREATE_NEW_PROCESS_GROUP"`.
 
-### 31.5 What this does not change
+The gate starts every check in its own process group so that a timeout can
+terminate the check's whole tree. On Windows that is
+`subprocess.CREATE_NEW_PROCESS_GROUP`; on POSIX the flag does not exist and
+the group is created with `start_new_session` instead. The code was correct
+at runtime on both platforms -- the conditional expression never evaluates
+the attribute on POSIX -- but `mypy` checks the attribute rather than the
+branch, and mypy's default platform is the host it runs on. The gate was
+written on Windows, so the check passed there and could not pass on Linux.
 
-The hosted run is now a fact, but it is not a release verdict. The §29.6
-and §30 findings are untouched by it: the API still accepts
+A gate that runs on both platforms has to type-check for both. The flag is
+now read through `getattr`, which is the Windows value there and zero
+everywhere else, and the gate runs its own type check twice: once with
+`--platform linux` and once with `--platform win32`. A branch that only one
+of the two can reach is now checked rather than assumed, and the defect
+that this section describes could not have passed the gate on either runner.
+
+This defect was in the gate before the hosted runs. It was never visible
+because the gate had never run on a platform that was not the one it was
+written on.
+
+### 31.5 Evidence
+
+The repaired gate was run against the artifacts the first hosted run
+retained. Both are accepted: the Linux evidence with its one declared and
+observed skip, and the Windows evidence with none, **1,059 tests** each.
+
+A full local portable gate run then passed end to end: **1,059 Kotlin tests**
+across all 15 modules, **1,695 backend tests** in portable mode with no
+failures and no skips, strict mypy over **134 source files** for both
+platforms, **26** parity comparisons agreed with none disagreed, and the live
+HTTP document round trip.
+
+### 31.6 What this does not change
+
+The hosted runs are now a fact, but they are not a release verdict. The
+§29.6 and §30 findings are untouched by them: the API still accepts
 unauthenticated callers, workflow approval is still unauthenticated, the
 live SSE subscriber queues are still unbounded, the installed-wheel
 deployment is still unproven, and the desktop accessibility evidence is
