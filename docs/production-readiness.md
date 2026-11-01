@@ -39,6 +39,14 @@ the offline model double. It does not contact a live language-model provider.
 It refuses missing XML, zero tests, inconsistent counts, failures, errors and
 skips. Module reports must exist for every declared Kotlin module.
 
+A skip is refused unless `backend/platform-checks.json` declares it, by class
+and by test name, for the platform the gate is running on. A test that asserts
+a guarantee only one platform gives cannot run on the others, so it declares
+an assumption and skips elsewhere; the declaration names exactly those. The
+gate also refuses a declared skip that did not happen, so the declaration
+cannot rot into a licence to skip anything. The effective declaration is
+copied into the run evidence beside `external-checks.json`.
+
 `--portable` runs the automated checks suitable for hosted CI. It explicitly
 excludes the three Microsoft Word conformance modules and five exact tests requiring
 real semantic/NLI model weights, recording their addresses in
@@ -58,10 +66,17 @@ and runs the gate in portable mode on Windows and Linux. It grants read-only rep
 access, does not retain checkout credentials, and uploads logs and test reports
 even when a check fails. It does not deploy or publish anything.
 
-The workflow is prepared locally. No hosted run has been observed and no remote
-was created. macOS and Python 3.12 have not been exercised by this matrix. Local
-verification of the existing environment does not prove a fresh installation;
-the first clean CI runs must establish that separately.
+The workflow ran on hosted Windows and Linux runners on 2026-11-01, against
+`Sifr-r/LMeditor` pull request 1. Both runners installed the locked
+environment cleanly, built the tier and ran the same 1,059 Kotlin tests across
+15 modules, and passed strict Python typing. The run then failed on both
+runners, each for a different real reason: the Linux runner refused a
+platform-conditional Kotlin skip that nothing had declared, and the Windows
+runner caught a collision between the frozen web witness and a `html.parser`
+internal that CPython introduced in 3.13.16. Both defects are described in
+`ARCHITECTURE.md` §31 and repaired. macOS and Python 3.12 have not been
+exercised by this matrix, and the repairs are not yet proven by a second
+hosted run.
 
 ## Remaining release work, in order
 

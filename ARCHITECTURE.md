@@ -4816,3 +4816,112 @@ findings remain open. The generators and four auxiliary documentation checkers
 under ignored `.tools/` still need promotion to maintained source before all old
 handoff checks can be reproduced from a clean checkout.
 - The rebinding case was not demonstrated against a live browser.
+
+**Superseded by §31.** The "no hosted CI run" statement above describes the
+state on 2026-10-28 and is no longer true: the workflow ran on hosted Windows
+and Linux runners on 2026-11-01 and found two real defects. The claim about
+deployment and publishing is unchanged.
+
+## 31. The first hosted CI run -- 2026-11-01
+
+Section 30.3 said that no hosted CI run was claimed. That is superseded.
+The workflow ran on hosted Windows and Linux runners for the first time,
+against the branch that carries the tier migration, and it found two
+defects that the local Windows runs could not. Both runners failed, each
+for its own reason, and both reasons were real.
+
+### 31.1 What the hosted run established
+
+The run is `Sifr-r/LMeditor` pull request 1, run 41295655441. On both
+runners the locked installation succeeded on a clean checkout, the Kotlin
+build produced the same **1,059 tests across 15 modules**, and strict
+Python typing passed. The gate's own machinery worked: the process tree
+was bounded, the evidence was retained as an artifact, and the failure was
+reported rather than swallowed.
+
+The local runs had been on CPython 3.13.9 and on Windows only. The hosted
+runners were CPython 3.13.16 on Windows and Linux. That difference is what
+the next two sections are about.
+
+### 31.2 The witness and the standard library
+
+The Windows runner failed the parity check *the web evidence*: the Python
+witness found one result in the page and the Kotlin tier found two. The
+harness reported 25 agreed and 1 disagreed, and the stderr carried
+`Could not parse the search response: can only join an iterable`.
+
+CPython gave `html.parser.HTMLParser` an internal `_pending` buffer in
+3.13.16 and 3.14.6, and joins that buffer in `close()`. The frozen witness
+`_DuckDuckGoResultParser` keeps its own state under that same name: the
+result that is waiting for its snippet. A subclass that shadows the name
+replaces the stdlib's buffer with its own state, and `close()` then joins
+the subclass's state, which is not iterable. The parse died with
+`TypeError: can only join an iterable` -- after the first result had
+already been recorded, so the page yielded one result and lost the second.
+
+The witness caught that exception and returned what it had, which is why
+the failure was a disagreement about a count and not a crash.
+
+Reproduced under CPython 3.12.13, 3.13.9, 3.13.13 and 3.14.5 the witness
+finds two results; under 3.14.7 it finds one and raises. The local
+environment is 3.13.9, so every local run agreed with Kotlin and the
+divergence was invisible until a runner used a newer interpreter.
+
+The repair renames the witness's attribute to `_pending_result`. The rule
+the witness states does not change: it produces the two results it has
+always produced, on every supported interpreter. Only the name of a
+private attribute moved, so the rule survives a change in the standard
+library it never depended on. The witness is not rewritten to follow
+Kotlin -- it is restored to the behaviour it always had.
+
+`test_the_frozen_web_parser_keeps_every_result_it_finds` pins that count
+directly, so a future change in the standard library is caught by a unit
+test rather than by the parity harness, where it costs a Kotlin build to
+see.
+
+### 31.3 The gate and a platform guarantee
+
+The Linux runner failed earlier, in the Kotlin evidence check. The gate
+refuses every skipped test, and one Kotlin test skips on Linux.
+
+`SourceArchiveTest`'s *Windows mandatory file lock produces typed write
+failure without losing old record* asserts a guarantee only Windows gives:
+the tier refuses a write over a locked record only where the lock is
+mandatory. The test states that assumption and skips where the guarantee
+does not hold. The gate's zero-skip rule rejected the skip, so the gate
+could never pass on the Linux runner the workflow declares. The rule was
+total where it had to be scoped.
+
+Across all 15 Kotlin modules on the hosted Linux runner there was exactly
+one skip; on the Windows runner there were none.
+
+The repair scopes the rule rather than dropping it.
+`backend/platform-checks.json` is a checked-in declaration of the tests
+that may skip, per platform, named exactly by class and test name. The gate
+still refuses every skip it has not been told about, and it now also
+refuses a declaration that did not happen -- so a platform cannot declare
+a skip and then not have it, and the declaration cannot rot unnoticed. The
+effective declaration is copied into the run evidence beside
+`external-checks.json`, so the exclusions are visible in the artifact
+rather than implicit in the source.
+
+Both behaviours are covered by fault injection in `test_release_gate.py`:
+an undeclared skip is rejected, a declared skip that happened is accepted,
+and a declared skip that did not happen is rejected.
+
+### 31.4 Evidence
+
+The repaired gate was run against the artifacts the hosted run retained.
+Both are accepted: the Linux evidence with its one declared and observed
+skip, and the Windows evidence with none, **1,059 tests** each.
+
+### 31.5 What this does not change
+
+The hosted run is now a fact, but it is not a release verdict. The §29.6
+and §30 findings are untouched by it: the API still accepts
+unauthenticated callers, workflow approval is still unauthenticated, the
+live SSE subscriber queues are still unbounded, the installed-wheel
+deployment is still unproven, and the desktop accessibility evidence is
+still missing. The gate was made able to run on the platforms it
+declares; it was not made to certify a product that is not ready.
+
