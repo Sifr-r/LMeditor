@@ -1,5 +1,7 @@
 # Source Ingestion & Bibliographic Metadata — Implementation Plan
 
+> **Historical plan — 2026-10-25.** This plan was executed; it records what was built, and it is kept as the record of that decision. The Flutter/Dart parts of it are **moot**: the desktop client was removed on 2026-10-25 and every `client/` path named below no longer exists. The backend parts — the `lmeditor.ingestion` package, the six loaders, the resolver chain, `POST /api/v1/sources/ingest` — were implemented and **stand unchanged**; note that the ingestion rules now also live in the Kotlin tier (`kotlin/ingest`), which owns them. See `ARCHITECTURE.md` §19.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace LMeditor's `raw_texts: list[str]`-only ingest path with a real source-ingestion pipeline that accepts PDF, DOCX, Markdown, HTML, plain text, and URLs from the desktop client and the REST API, attaches structured `BibliographicRecord` metadata to each source via five resolvers (PDF header, CrossRef, arXiv, PubMed, OpenAlex), and produces the existing `SourceChunk` list with SHA-256 IDs. Ships with a Flutter drag-and-drop source panel.
