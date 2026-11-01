@@ -12,18 +12,31 @@ dependencies = [
     "pydantic>=2.7.0",
     "dspy-ai",
     "langgraph",
-    "llama-index",
     "sentence-transformers",
     "fastapi",
     "uvicorn",
     "numpy",
     # Source ingestion (Tasks 6, 7, 14)
-    "pypdf>=4.0.0",
-    "python-docx>=1.0.0",
-    "markdownify>=0.11.0",
-    "markdown>=3.0",  # MarkdownSourceLoader needs MD→HTML; markdownify is HTML→MD (opposite direction)
-    "trafilatura>=1.6.0",
-    "httpx>=0.27.0",
+    #
+    # Attribution, corrected: the five packages below are imported by exactly
+    # one part of the tree -- the frozen Python witnesses under
+    # ``lmeditor._reference`` -- and by the test-suite that drives them. The
+    # live modules that used to name them are now doors to the Kotlin tier:
+    # ``lmeditor.word.reader`` / ``lmeditor.word.writer`` /
+    # ``lmeditor.ingestion.loaders`` / ``lmeditor.ingestion.pdf_metadata`` /
+    # ``lmeditor.factcheck.web`` call across the NDJSON seam, and the tier
+    # reads OOXML, PDF, Markdown and HTML with the JDK and its own codecs.
+    # The packages are kept because the frozen witnesses are the oracle the
+    # parity harness measures the tier against -- removing them would make the
+    # harness unable to ask the Python side anything -- but they are *not*
+    # runtime requirements of the shipped doors, and nothing in the installed
+    # package imports them.
+    "pypdf>=4.0.0",  # lmeditor._reference.ingestion_pdf_metadata, lmeditor._reference.ingestion_loaders
+    "python-docx>=1.0.0,<2.0.0",  # lmeditor._reference.word_writer only; it reaches into python-docx internals (docx.oxml, docx.opc.part.Part), which a major release may move — bound the range rather than let the writer break silently
+    "lxml>=5.0.0",  # OOXML parsing for lmeditor._reference.word_reader (WordprocessingML parts)
+    "markdown>=3.0",  # lmeditor._reference.ingestion_loaders needs MD→HTML; HTML→Markdown is a different direction
+    "trafilatura>=1.6.0",  # lmeditor._reference.ingestion_loaders, lmeditor._reference.factcheck_web
+    "httpx>=0.27.0",  # unlike the five above, httpx is a real runtime dependency: lmeditor.ingestion.http_safety and lmeditor.ingestion.url_policy read an httpx.Response
     "python-multipart>=0.0.9",  # FastAPI multipart (Form/File) support; required by POST /api/v1/sources/ingest
 ]
 
@@ -36,6 +49,28 @@ dev = [
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/lmeditor"]
+# The frozen Python witnesses under ``src/lmeditor/_reference`` are the oracle
+# the parity harness measures the Kotlin tier against. They are a development
+# asset, not part of the shipped package: every rule they carry is reachable
+# from the doors in ``lmeditor`` through the NDJSON seam, and nothing in the
+# installed package imports a witness. Excluding them keeps 36 files (35
+# modules and the package's ``__init__``) out of the wheel. The pattern is
+# written twice because hatchling matches an
+# ``exclude`` pattern against the path relative to the project root *and*
+# against the path relative to the package root; both spellings name the same
+# directory, so the exclusion holds whichever base is used.
+exclude = [
+    "src/lmeditor/_reference",
+    "_reference",
+]
+
+[tool.hatch.build.targets.sdist]
+# Same reason as the wheel: the witnesses are the oracle for the parity
+# harness, not part of the distribution. The git tree keeps them.
+exclude = [
+    "src/lmeditor/_reference",
+    "_reference",
+]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
@@ -60,6 +95,20 @@ module = [
     "dspy.*",
     "langgraph.*",
     "sentence_transformers.*",
+]
+ignore_missing_imports = true
+
+# These two ship no type information (no ``py.typed`` marker, no stubs), so
+# mypy reports every import of them as untyped. The diagnostic is silenced
+# here, per module, rather than with an inline ``# type: ignore`` at each
+# import site: an inline ignore is *itself* reported as unused when mypy is
+# invoked with ``--ignore-missing-imports``, so the two spellings cannot both
+# be clean. Declaring the modules keeps ``mypy src`` and
+# ``mypy src --ignore-missing-imports`` equally clean.
+[[tool.mypy.overrides]]
+module = [
+    "lxml.*",
+    "markdown.*",
 ]
 ignore_missing_imports = true
 
