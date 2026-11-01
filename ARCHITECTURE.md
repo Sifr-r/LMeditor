@@ -5009,6 +5009,11 @@ observed in the run. Both runs retained their effective declaration beside
 `external-checks.json`, so the exclusions are visible in the artifact rather
 than implicit in the source.
 
+The merge commit was then gated on `main` itself -- run 41305519803 -- and
+passed there as well, with the same evidence on both runners. The gate is
+therefore known to pass on the branch that carries the work, not only on a
+pull request against it.
+
 This is a hosted pass of the candidate gate on two platforms. It is not a
 release verdict, and it is not a production readiness claim; §31.7 says what
 is still open.
