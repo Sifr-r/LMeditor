@@ -41,7 +41,7 @@ version exactly.
 | Package | Owns |
 | :--- | :--- |
 | `lmeditor.desktop` | `Main.kt` — the window and its coroutine scope |
-| `lmeditor.desktop.net` | `BackendError`, `MultipartBody`, `BackendClient`, `SseClient` |
+| `lmeditor.desktop.net` | `BackendError`, `ApiCredential`, `MultipartBody`, `BackendClient`, `SseClient` |
 | `lmeditor.desktop.model` | `StudioModels`, `StudioState`, `StudioController`, `RunReducer` |
 | `lmeditor.desktop.render` | `ManuscriptBlocks` — the display renderer |
 | `lmeditor.desktop.ui` | `Theme`, `FileDialogs`, and the fourteen remaining screens and panes |
@@ -72,6 +72,26 @@ the backend URL under **Connection**, then choose **Apply**. Check, Refresh
 sources, Write and Export stay disabled while the URL has unapplied changes.
 Invalid addresses show an error when applied and leave the active connection
 unchanged, so partial addresses can be edited freely.
+
+### 3.1 The credential
+
+Every route under `/api/` requires a bearer token, and the client sends it on
+every request: the three REST request sites and the event stream. The token
+is resolved **once**, when the window is built, in this order:
+
+1. `LMEDITOR_API_TOKEN`, when it is set and not blank — the operator's own
+   token, read the way the server reads it.
+2. The token file: `LMEDITOR_API_TOKEN_FILE` when it is set, otherwise
+   `<home>/.lmeditor/api-token`.
+
+The token file is the channel between the two halves of the application: the
+server writes the token it generated there, and the client reads it, because
+the two are separate processes and the client is not necessarily started with
+the server's environment.
+
+A token that cannot be read is a typed failure that names the place the
+client looked, not a request that quietly goes out without it. The token
+never appears in a log message, an error message or a URL.
 
 To package an installer:
 
@@ -204,9 +224,10 @@ in a Python process; this is a separate program talking to a separate process
 across a boundary that already has a contract.
 
 Failures are typed and never swallowed. `BackendError` is a sealed
-hierarchy — `Unreachable`, `Refused`, `Malformed` — and the controller
-records the message in the state, where the operator can see it, rather than
-turning a failure into an empty result that would look like success.
+hierarchy — `Unreachable`, `Refused`, `Malformed`, `Uncredentialed` — and the
+controller records the message in the state, where the operator can see it,
+rather than turning a failure into an empty result that would look like
+success.
 
 ### 5.1 One trap worth naming
 

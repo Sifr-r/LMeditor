@@ -21,6 +21,7 @@ import lmeditor.core.LMeditorError
 import lmeditor.core.Notebook
 import lmeditor.core.NotebookSummary
 import lmeditor.core.OutlineNodeInput
+import lmeditor.desktop.net.ApiCredential
 import lmeditor.desktop.net.BackendClient
 import lmeditor.desktop.net.BackendError
 import lmeditor.desktop.net.SseClient
@@ -58,11 +59,27 @@ class StudioController(
 
     private val _state = MutableStateFlow(StudioState())
     private val connectionLock = Any()
-    private var connection = Connection(BackendClient(StudioState.DEFAULT_BACKEND_URL, http))
+
+    /**
+     * The credential the API requires.
+     *
+     * It is resolved once, when the window is built, and the same one
+     * travels on every request: the REST client and the stream are two
+     * halves of one conversation with the server, and a client that carried
+     * two different tokens would be refused by whichever one was wrong.
+     *
+     * Reading it once is enough. A token that changes on disk changes on the
+     * server's next start too, and the client is restarted with it.
+     */
+    private val credential: ApiCredential = ApiCredential.resolve()
+
+    private var connection = Connection(
+        BackendClient(StudioState.DEFAULT_BACKEND_URL, http, credential),
+    )
     private var streamJob: Job? = null
 
     private inner class Connection(val backend: BackendClient) {
-        val events = SseClient(http, backend.baseUrl)
+        val events = SseClient(http, backend.baseUrl, credential)
         val job = Job(scope.coroutineContext[Job])
         var activeTasks = 0
 
@@ -372,7 +389,7 @@ class StudioController(
     /** Point the window at a different backend. */
     fun setBackendUrl(url: String) {
         val next = try {
-            BackendClient(url, http)
+            BackendClient(url, http, credential)
         } catch (cause: LMeditorError) {
             _state.update { it.copy(error = cause.message) }
             return
