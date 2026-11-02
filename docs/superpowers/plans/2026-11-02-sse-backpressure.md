@@ -1442,6 +1442,43 @@ assume that every frame carries an `id:` or that every `data:` is an event
 envelope: a frame with no `id:` is a control frame, and a `data:` that does
 not decode as an event envelope is one too.
 
+### Correction 11 — Task 4: the brief's Step 4 code deadlocks the pre-existing cancellation test
+
+**Finding.** The brief's Step 4 replaces `SseClient.events` with a version
+that reads the response body in the `channelFlow`'s own producer scope and
+drops `awaitClose` altogether — the brief says *"awaitClose is not needed:
+the producer owns the response body"*. That is wrong.
+
+The tree already holds a test for exactly this: `cancelling an idle stream
+closes and unblocks its reader` cancels the flow while the reader is blocked
+in `readLine()`. A blocked read in the producer scope cannot be interrupted
+— the producer is suspended inside `readLine()`, so `awaitClose` never runs,
+so the body is never closed, so the read never returns and the cancellation
+never completes. The implementer verified this empirically before changing
+anything: the brief's verbatim code ran past 60 seconds against that test
+where the pre-existing code completes.
+
+**Ruling.** The body is read on a worker launched in `Dispatchers.IO`, as
+the pre-existing code did, and the open body is held in an `AtomicReference`
+so that `awaitClose` can close it from the cancelling thread. The worker
+owns the read; the channel's `awaitClose` closes the body, which unblocks
+the read. The reconnect loop lives inside the worker, so the producer stays
+responsive.
+
+This is the shape the credential slice's client already used, and the
+cancellation test that pins it was already in the tree before this task.
+
+**Correction 12 — the brief's test uses the wrong accessor for the wire
+name.**
+
+**Finding.** The brief's Step 1 test asserts `it.eventType.value`, but
+`EventType` implements `WireEnum`, whose property is `wire` — *"the exact
+string this value has on the wire"*. There is no `value` property, so the
+brief's test does not compile.
+
+**Ruling.** The assertion uses `it.eventType.wire`, which is what the JSON
+codec writes and what travels.
+
 ---
 
 ### Task 5: The ledger and the readiness list
