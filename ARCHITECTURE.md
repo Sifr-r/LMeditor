@@ -5628,13 +5628,14 @@ The local portable gate passes on this tree, and its evidence is kept under
 | Kotlin tests | **1,081** across 15 modules, 0 failures, 0 errors, 0 skipped (desktop 140) |
 | Strict Python typing | **135 source files**, clean for `--platform linux` and `--platform win32` |
 | Backend suite (full) | **1,749 passed**, 0 failed |
-| Backend suite (portable) | 1,724 passed, 5 deselected, 0 failed |
+| Backend suite (portable) | 1,725 passed, 5 deselected, 0 failed |
 | Kotlin parity | 26 agreed, 0 disagreed, 0 skipped |
 | Live HTTP round trip | every check passed |
 
-The evidence for this run is `build/release/run-fwl5lc_d`. The five portable
+The evidence for this run is `build/release/run-jpm08wa3`. The five portable
 deselections and the three excluded Word modules are recorded beside it in
-`external-checks.json`.
+`external-checks.json`, and the full suite's own log is kept beside them as
+`pytest-full-suite.log`, because the gate itself runs only the portable scope.
 
 The baseline was 1,075 Kotlin tests and 1,740 backend tests. The slice adds
 **6** Kotlin tests and **9** backend tests:

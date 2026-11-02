@@ -216,9 +216,10 @@ live HTTP document round trip, with no executed failures or skips. The
 evidence is under `build/release/run-iuv5yp7p`; the full local suite
 outside the portable scope is **1,740 passed, 0 failed**.
 
-The SSE slice was verified the same way: **1,079 Kotlin tests**, **1,724
+The SSE slice was verified the same way: **1,081 Kotlin tests**, **1,725
 selected backend tests**, strict typing over **135 source files** for both
 platforms, **26** parity comparisons and the live HTTP document round trip,
 with no executed failures or skips. The evidence is under
-`build/release/run-fwl5lc_d`; the full local suite outside the portable scope
-is **1,748 passed, 0 failed**.
+`build/release/run-jpm08wa3`, with the full suite's own log kept beside it as
+`pytest-full-suite.log`; the full local suite outside the portable scope is
+**1,749 passed, 0 failed**.
