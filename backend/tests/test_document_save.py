@@ -30,6 +30,7 @@ from lmeditor.server.app import create_app
 from lmeditor.server.session import session_manager
 from lmeditor.workflow.nodes import hitl_checkpoint_node
 from lmeditor.workflow.state import HarnessState
+from tests.http_support import async_client
 
 #: A lineage that says where a passage came from. The pipeline establishes
 #: these; an operator's edit must not erase them.
@@ -59,8 +60,8 @@ def _draft() -> SectionDraft:
 
 def _client() -> httpx.AsyncClient:
     """An HTTP client bound to the application under test."""
-    transport = httpx.ASGITransport(app=create_app())
-    return httpx.AsyncClient(transport=transport, base_url="http://test")
+    app = create_app()
+    return async_client(app)
 
 
 def _run(coro: Any) -> Any:

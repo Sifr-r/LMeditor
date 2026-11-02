@@ -31,12 +31,26 @@ from pathlib import Path
 import pytest
 
 from lmeditor.bridge import BridgeUnavailableError
+from tests.http_support import TEST_TOKEN
 
 
 @pytest.fixture(autouse=True)
 def isolated_source_archive(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Never let a test clear or populate the operator's source archive."""
     monkeypatch.setenv("LMEDITOR_SOURCES_DIR", str(tmp_path / "source-archive"))
+
+
+@pytest.fixture(autouse=True)
+def suite_credential(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give every test the API's credential, and keep it off the operator's disk.
+
+    Every route under ``/api/`` requires a bearer token, so the suite names
+    one and presents it. The token file is pointed at a temporary path: the
+    server writes the effective token there, and a test must never write
+    into the operator's own home directory.
+    """
+    monkeypatch.setenv("LMEDITOR_API_TOKEN", TEST_TOKEN)
+    monkeypatch.setenv("LMEDITOR_API_TOKEN_FILE", str(tmp_path / "api-token"))
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 TIER_LIB_DIR = REPO_ROOT / "kotlin" / "bridge" / "build" / "libs"

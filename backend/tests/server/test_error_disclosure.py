@@ -45,6 +45,7 @@ from lmeditor.server.notebooks import close_notebooks_root
 from lmeditor.server.session import session_manager
 from lmeditor.server.sources import StoredSource, source_library
 from lmeditor.tier import server as tier_server
+from tests.http_support import async_client
 
 #: A path on a machine that is not the caller's business.
 SECRET_PATH = r"C:\Users\victim\AppData\Local\Temp\lmeditor_uploads\secret\notes.md"
@@ -59,10 +60,9 @@ JVM_TEXT = (
 def _call(method: str, path: str, **kwargs: Any) -> httpx.Response:
     """Make one request against the application."""
     app = create_app()
-    transport = httpx.ASGITransport(app=app)
 
     async def run() -> httpx.Response:
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with async_client(app) as client:
             return await client.request(method, path, **kwargs)
 
     return asyncio.run(run())
@@ -80,10 +80,8 @@ def _call_with_failure(error: Exception) -> httpx.Response:
     async def _failure() -> dict[str, Any]:
         raise error
 
-    transport = httpx.ASGITransport(app=app)
-
     async def run() -> httpx.Response:
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with async_client(app) as client:
             return await client.get("/_test/failure")
 
     return asyncio.run(run())
@@ -489,10 +487,8 @@ def test_a_tier_failure_that_reaches_the_gateway_carries_no_jvm_text(
         source_library.add(stored)
         return {}
 
-    transport = httpx.ASGITransport(app=app)
-
     async def run() -> httpx.Response:
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with async_client(app) as client:
             return await client.get("/_test/tier")
 
     response = asyncio.run(run())
@@ -663,8 +659,7 @@ def test_a_successful_edit_carries_no_path_in_its_reason(
         session = await session_manager.create_session(doc_id=doc_id, topic="edit")
         await session.complete(sections=[{"section_id": section_id, "title": "Intro"}])
         app = create_app()
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with async_client(app) as client:
             return await client.post(
                 f"/api/v1/documents/{doc_id}/edits",
                 json={"section_id": section_id, "instruction": "tighten the wording"},

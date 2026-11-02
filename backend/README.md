@@ -34,10 +34,22 @@ cd backend
 .\.venv\Scripts\python.exe -m uvicorn lmeditor.server.app:app --port 8000
 ```
 
-Then check it:
+Every route under `/api/` needs a bearer token. The server settles one at
+startup — the operator's own `LMEDITOR_API_TOKEN`, the token already in the
+token file, or a new one — and writes it to the token file. It is at
+`<home>/.lmeditor/api-token` unless `LMEDITOR_API_TOKEN_FILE` names
+another. Read it back and check the server with it:
 
 ```powershell
-Invoke-RestMethod http://127.0.0.1:8000/api/v1/health | ConvertTo-Json
+$token = (Get-Content "$HOME\.lmeditor\api-token" -Raw).Trim()
+Invoke-RestMethod http://127.0.0.1:8000/api/v1/health -Headers @{ Authorization = "Bearer $token" } | ConvertTo-Json
+```
+
+A request without the token is refused with a **401** and the same answer
+whether the token was missing or wrong:
+
+```json
+{ "detail": "This API requires a bearer token." }
 ```
 
 The health payload reports whether a language model is loaded:
@@ -264,6 +276,9 @@ never be mistaken for one a real model wrote.
 | `GET` | `/api/v1/documents/{doc_id}` | The authoritative manuscript and its scorecard |
 | `GET` | `/api/v1/documents/{doc_id}/export.docx` | Export the manuscript as a Word document |
 
+Every route in that table needs the bearer token described under
+[Running it](#running-it).
+
 A generation request needs source material, supplied either inline
 (`source_chunks`) or by reference to sources the server already holds
 (`source_ids`):
@@ -273,7 +288,7 @@ $body = @{
   topic     = "Municipal waste collection trends"
   source_ids = @("audit_2023")
 } | ConvertTo-Json
-Invoke-RestMethod http://127.0.0.1:8000/api/v1/documents/generate -Method Post -Body $body -ContentType "application/json"
+Invoke-RestMethod http://127.0.0.1:8000/api/v1/documents/generate -Method Post -Body $body -ContentType "application/json" -Headers @{ Authorization = "Bearer $token" }
 ```
 
 ---
@@ -326,6 +341,46 @@ and it must be named too.
 
 The desktop client sends no `Origin` header at all, so it is not
 affected by any of this.
+
+---
+
+## The bearer token
+
+The origin rule answers what a **page** may do. It cannot answer what a
+**process** may do, because a process need only omit the `Origin` header
+and then the request is answered as if it came from the operator. So every
+route under `/api/` also requires a bearer token:
+
+```
+Authorization: Bearer <token>
+```
+
+A request without one is refused with a **401**, and the refusal is the
+same whether the token was missing or wrong — the same status, the same
+headers and the same body — so a caller cannot learn anything from the
+difference between the two.
+
+The token is settled once, at startup, in this order:
+
+1. `LMEDITOR_API_TOKEN`, when it is set and not blank. The operator's own
+   token, used verbatim.
+2. The token file, when it holds one. This is what makes the token survive
+   a restart.
+3. A new token, made of 32 random bytes.
+
+Whatever it turns out to be, it is written to the token file — at
+`<home>/.lmeditor/api-token` unless `LMEDITOR_API_TOKEN_FILE` names
+another — because the server and the desktop client are separate processes
+and the file is how one hands the credential to the other. A file that
+already holds the token is not rewritten, so the file's timestamp says when
+the token last changed and nothing else.
+
+To rotate the token, set `LMEDITOR_API_TOKEN` or delete the token file and
+restart the server.
+
+The token is never logged, never in a response body and never in a URL.
+The API's own documentation (`/docs`, `/redoc`, `/openapi.json`) is not
+credentialed: it describes the API and acts on nothing.
 
 ---
 

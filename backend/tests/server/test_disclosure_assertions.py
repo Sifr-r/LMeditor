@@ -41,6 +41,7 @@ from lmeditor.core.exceptions import (
 )
 from lmeditor.server import routes, routes_helpers
 from lmeditor.server.app import create_app
+from tests.http_support import async_client
 
 #: A path on a machine that is not the caller's business.
 SECRET_PATH = r"C:\Users\victim\AppData\Local\Temp\lmeditor_uploads\secret\notes.md"
@@ -57,10 +58,9 @@ BOUNDARY_HEAD = r"D:\Users\victim"
 def _call(method: str, path: str, **kwargs: Any) -> httpx.Response:
     """Make one request against the application."""
     app = create_app()
-    transport = httpx.ASGITransport(app=app)
 
     async def run() -> httpx.Response:
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with async_client(app) as client:
             return await client.request(method, path, **kwargs)
 
     return asyncio.run(run())
@@ -78,10 +78,8 @@ def _call_with_failure(error: Exception) -> httpx.Response:
     async def _failure() -> dict[str, Any]:
         raise error
 
-    transport = httpx.ASGITransport(app=app)
-
     async def run() -> httpx.Response:
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with async_client(app) as client:
             return await client.get("/_test/failure")
 
     return asyncio.run(run())
@@ -95,10 +93,8 @@ def _call_with_details(error: type[Exception], details: dict[str, Any]) -> httpx
     async def _failure() -> dict[str, Any]:
         raise error("the chunker could not read the document", details=details)  # type: ignore[call-arg]
 
-    transport = httpx.ASGITransport(app=app)
-
     async def run() -> httpx.Response:
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with async_client(app) as client:
             return await client.get("/_test/failure")
 
     return asyncio.run(run())

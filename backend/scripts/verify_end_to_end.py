@@ -31,8 +31,11 @@ import io
 import json
 import os
 import re
+import secrets
+import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import zipfile
@@ -68,6 +71,38 @@ def _info(message: str) -> None:
     print(f"{DIM}      {message}{RESET}")
 
 
+def auth_headers(token: str) -> dict[str, str]:
+    """The header that carries the API's credential.
+
+    Every route under ``/api/`` refuses a request that does not carry it, so
+    the credential travels with every request the script makes.
+    """
+    return {"Authorization": f"Bearer {token}"}
+
+
+def the_operators_token() -> str:
+    """The token a server the script did not start is served with.
+
+    A server the operator started was given its token in the environment, or
+    it generated one and left it in the token file. The script looks in the
+    two places the API's own client looks, so that a run against the
+    operator's own server can talk to it.
+
+    Returns:
+        The token, or an empty string when there is none to be found.
+    """
+    named = os.environ.get("LMEDITOR_API_TOKEN", "").strip()
+    if named:
+        return named
+    path = os.environ.get("LMEDITOR_API_TOKEN_FILE", "").strip()
+    if not path:
+        path = str(Path.home() / ".lmeditor" / "api-token")
+    try:
+        return Path(path).read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
 def install_stub_model() -> None:
     """Install the deterministic model double into the server process."""
     import dspy
@@ -78,10 +113,17 @@ def install_stub_model() -> None:
     _info("installed the deterministic stub model")
 
 
-def spawn_server(port: int) -> subprocess.Popen[bytes] | None:
-    """Start a backend configured with the deterministic stub model."""
+def spawn_server(port: int, token: str, token_file: Path) -> subprocess.Popen[bytes] | None:
+    """Start a backend configured with the deterministic stub model.
+
+    The server is served with the credential the script presents, and the
+    token file it keeps is the one the script owns: a token left in the
+    operator's home directory would outlive the run.
+    """
     env = dict(os.environ)
     env["LMEDITOR_LM_PROVIDER"] = "stub"
+    env["LMEDITOR_API_TOKEN"] = token
+    env["LMEDITOR_API_TOKEN_FILE"] = str(token_file)
     env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "src")
     command = [
         sys.executable,
@@ -99,12 +141,21 @@ def spawn_server(port: int) -> subprocess.Popen[bytes] | None:
     return subprocess.Popen(command, env=env, cwd=str(Path(__file__).resolve().parents[1]))
 
 
-def wait_for_health(base_url: str, timeout: float = 60.0) -> bool:
-    """Wait until the backend answers its health check."""
+def wait_for_health(base_url: str, token: str, timeout: float = 60.0) -> bool:
+    """Wait until the backend answers its health check.
+
+    The health check is under ``/api/`` and is credentialed like every other
+    route, so the probe presents the credential: a probe without one is
+    answered with a refusal, and the server would never look healthy.
+    """
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
-            response = httpx.get(f"{base_url}/api/v1/health", timeout=5.0)
+            response = httpx.get(
+                f"{base_url}/api/v1/health",
+                timeout=5.0,
+                headers=auth_headers(token),
+            )
             if response.status_code == 200:
                 return True
         except httpx.HTTPError:
@@ -116,9 +167,10 @@ def wait_for_health(base_url: str, timeout: float = 60.0) -> bool:
 class StreamCollector:
     """Collects the SSE frames a run publishes."""
 
-    def __init__(self, base_url: str, doc_id: str) -> None:
+    def __init__(self, base_url: str, doc_id: str, token: str) -> None:
         self.base_url = base_url
         self.doc_id = doc_id
+        self.token = token
         self.events: list[dict[str, Any]] = []
         self._thread = threading.Thread(target=self._run, daemon=True)
 
@@ -128,7 +180,10 @@ class StreamCollector:
     def _run(self) -> None:
         try:
             with httpx.stream(
-                "GET", f"{self.base_url}/api/v1/stream/{self.doc_id}", timeout=300.0
+                "GET",
+                f"{self.base_url}/api/v1/stream/{self.doc_id}",
+                timeout=300.0,
+                headers=auth_headers(self.token),
             ) as response:
                 for line in response.iter_lines():
                     if not line.startswith("data:"):
@@ -194,22 +249,34 @@ def main() -> int:
     base_url = args.base_url.rstrip("/")
     failures = 0
     server: subprocess.Popen[bytes] | None = None
+    workspace: Path | None = None
+    # The credential the script presents. A server the script starts is
+    # served with the token below; a server the operator started was given a
+    # token of its own, and that one is read instead.
+    token = ""
 
     if args.live:
         print("Live mode: using the server's configured model.")
+        token = the_operators_token()
     else:
         print("Stub mode: verifying the wiring without a model provider.")
         if not args.no_spawn:
+            token = secrets.token_urlsafe(32)
+            workspace = Path(tempfile.mkdtemp(prefix="lmeditor_end_to_end_"))
             port = int(base_url.rsplit(":", 1)[-1]) if ":" in base_url else 8000
-            server = spawn_server(port)
-            if not wait_for_health(base_url):
+            server = spawn_server(port, token, workspace / "api-token")
+            if not wait_for_health(base_url, token):
                 _fail("the backend did not become healthy in time")
                 if server is not None:
                     server.terminate()
+                if workspace is not None:
+                    shutil.rmtree(workspace, ignore_errors=True)
                 return 1
+        else:
+            token = the_operators_token()
 
     try:
-        return _run_checks(args, base_url)
+        return _run_checks(args, base_url, token)
     finally:
         if server is not None:
             server.terminate()
@@ -217,11 +284,13 @@ def main() -> int:
                 server.wait(timeout=10)
             except subprocess.TimeoutExpired:  # pragma: no cover
                 server.kill()
+        if workspace is not None:
+            shutil.rmtree(workspace, ignore_errors=True)
 
 
-def _run_checks(args: argparse.Namespace, base_url: str) -> int:
+def _run_checks(args: argparse.Namespace, base_url: str, token: str) -> int:
     failures = 0
-    client = httpx.Client(timeout=120.0)
+    client = httpx.Client(timeout=120.0, headers=auth_headers(token))
 
     print("\n1. Health")
     try:
@@ -271,7 +340,7 @@ def _run_checks(args: argparse.Namespace, base_url: str) -> int:
     doc_id = generate.json()["doc_id"]
     _ok(f"document {doc_id} started")
 
-    collector = StreamCollector(base_url, doc_id)
+    collector = StreamCollector(base_url, doc_id, token)
     collector.start()
 
     status = wait_for(client, base_url, doc_id, timeout=args.timeout)

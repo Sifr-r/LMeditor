@@ -45,6 +45,7 @@ from lmeditor.server.session import (
     WorkflowSession,
     session_manager,
 )
+from tests.http_support import async_client
 
 #: Upper bound for every wait that a lost sentinel could turn into a hang.
 WAIT_TIMEOUT: float = 5.0
@@ -55,7 +56,7 @@ BLOCK_TIMEOUT: float = 2.0
 
 
 def _client(app: Any) -> httpx.AsyncClient:
-    return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test")
+    return async_client(app)
 
 
 def _chunk() -> SourceChunk:

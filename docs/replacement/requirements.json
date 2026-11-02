@@ -1216,14 +1216,18 @@
       "section": "10",
       "stage": "M4",
       "owner": "kotlin:server",
-      "status": "in-progress",
-      "gate": "Call the gateway from a foreign origin and read back the refusal of the mutation, then call it without the installation credential and read back the refusal of that request too: the origin half is implemented, the installation credential is not.",
+      "status": "complete",
+      "gate": "Call the gateway from a foreign origin and read back the refusal of the mutation, then call it without the installation credential and read back the refusal of that request too.",
       "evidence": [
-        "backend/src/lmeditor/server/app.py:130",
-        "backend/src/lmeditor/server/app.py:146",
-        "backend/src/lmeditor/server/app.py:230",
-        "backend/src/lmeditor/server/app.py:460",
-        "backend/src/lmeditor/server/app.py:464"
+        "backend/src/lmeditor/server/app.py:136",
+        "backend/src/lmeditor/server/app.py:152",
+        "backend/src/lmeditor/server/app.py:443",
+        "backend/src/lmeditor/server/app.py:506",
+        "backend/src/lmeditor/server/credential.py:129",
+        "backend/src/lmeditor/server/credential.py:259",
+        "backend/tests/test_api_credential.py:124",
+        "backend/tests/test_api_credential.py:256",
+        "kotlin/desktop/src/main/kotlin/lmeditor/desktop/net/ApiCredential.kt:89"
       ],
       "blocks": [
         "R.12",

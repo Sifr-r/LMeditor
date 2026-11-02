@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import secrets
 import shutil
 import subprocess
 import sys
@@ -97,6 +98,38 @@ def _info(message: str) -> None:
     print(f"{DIM}      {message}{RESET}")
 
 
+def _auth_headers(token: str) -> dict[str, str]:
+    """The header that carries the API's credential.
+
+    Every route under ``/api/`` refuses a request that does not carry it, so
+    the credential travels with every request the script makes.
+    """
+    return {"Authorization": f"Bearer {token}"}
+
+
+def _the_operators_token() -> str:
+    """The token a server the script did not start is served with.
+
+    A server the operator started was given its token in the environment, or
+    it generated one and left it in the token file. The script looks in the
+    two places the API's own client looks, so that a run against the
+    operator's own server can talk to it.
+
+    Returns:
+        The token, or an empty string when there is none to be found.
+    """
+    named = os.environ.get("LMEDITOR_API_TOKEN", "").strip()
+    if named:
+        return named
+    path = os.environ.get("LMEDITOR_API_TOKEN_FILE", "").strip()
+    if not path:
+        path = str(Path.home() / ".lmeditor" / "api-token")
+    try:
+        return Path(path).read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
 def _install_stub_model() -> None:
     """Install the deterministic model double into this process."""
     import dspy
@@ -107,12 +140,20 @@ def _install_stub_model() -> None:
     _info("installed the deterministic stub model")
 
 
-def _spawn_server(port: int, library_dir: Path) -> subprocess.Popen[bytes]:
+def _spawn_server(
+    port: int, library_dir: Path, token: str, token_file: Path
+) -> subprocess.Popen[bytes]:
     """Start a backend configured with the deterministic stub model.
+
+    The server is served with the credential the script presents, and the
+    token file it keeps is the one inside the folder the script owns: a token
+    left in the operator's home directory would outlive the run.
 
     Args:
         port: The port to serve on.
         library_dir: Where the backend keeps its library.
+        token: The credential the backend is served with.
+        token_file: The file the backend keeps that credential in.
 
     Returns:
         The process, so the caller can stop it.
@@ -121,6 +162,8 @@ def _spawn_server(port: int, library_dir: Path) -> subprocess.Popen[bytes]:
     environment["LMEDITOR_LM_PROVIDER"] = "stub"
     environment["LMEDITOR_LM_MODEL"] = "offline-stub"
     environment["LMEDITOR_LIBRARY_DIR"] = str(library_dir)
+    environment["LMEDITOR_API_TOKEN"] = token
+    environment["LMEDITOR_API_TOKEN_FILE"] = str(token_file)
     environment["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "src")
     return subprocess.Popen(
         [
@@ -139,11 +182,16 @@ def _spawn_server(port: int, library_dir: Path) -> subprocess.Popen[bytes]:
     )
 
 
-def _wait_for_health(base_url: str, timeout: float = 90.0) -> bool:
+def _wait_for_health(base_url: str, token: str, timeout: float = 90.0) -> bool:
     """Wait until the backend answers its health check.
+
+    The health check is under ``/api/`` and is credentialed like every other
+    route, so the probe presents the credential: a probe without one is
+    answered with a refusal, and the server would never look healthy.
 
     Args:
         base_url: The address the backend serves on.
+        token: The credential to present.
         timeout: How long to wait for it.
 
     Returns:
@@ -152,7 +200,11 @@ def _wait_for_health(base_url: str, timeout: float = 90.0) -> bool:
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
-            response = httpx.get(f"{base_url}/api/v1/health", timeout=5.0)
+            response = httpx.get(
+                f"{base_url}/api/v1/health",
+                timeout=5.0,
+                headers=_auth_headers(token),
+            )
             if response.status_code == 200:
                 return True
         except httpx.HTTPError:
@@ -233,6 +285,10 @@ def main() -> int:
     workspace = Path(tempfile.mkdtemp(prefix="lmeditor-vault-"))
     vault = workspace / "vault"
     _write_vault(vault)
+    # The credential the script presents. A server the script starts is
+    # served with the token below; a server the operator started was given a
+    # token of its own, and that one is read instead.
+    token = ""
 
     try:
         if not args.no_spawn:
@@ -240,15 +296,20 @@ def main() -> int:
             _install_stub_model()
             port = int(base_url.rsplit(":", 1)[-1])
             _info(f"starting a backend on port {port}")
-            server = _spawn_server(port, workspace / "library")
+            token = secrets.token_urlsafe(32)
+            server = _spawn_server(
+                port, workspace / "library", token, workspace / "api-token"
+            )
+        else:
+            token = _the_operators_token()
 
         print("\n1. Health")
-        if not _wait_for_health(base_url, timeout=args.timeout):
+        if not _wait_for_health(base_url, token, timeout=args.timeout):
             _fail(f"the backend at {base_url} never became healthy")
             return 1
         _ok(f"the backend at {base_url} is healthy")
 
-        client = httpx.Client(timeout=60.0)
+        client = httpx.Client(timeout=60.0, headers=_auth_headers(token))
         failures = 0
 
         print("\n2. Open the vault")
