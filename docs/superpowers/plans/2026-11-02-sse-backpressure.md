@@ -1221,14 +1221,48 @@ Add to `kotlin/desktop/src/test/kotlin/lmeditor/desktop/net/SseClientTest.kt`:
                 .toByteArray()
         )
         val responses = ArrayDeque(listOf(first, second))
+        var requests = 0
         val http = StubHttpClient {
+            requests += 1
             CompletableFuture.completedFuture(StubResponse(it, 200, responses.removeFirst()))
         }
 
         val events = SseClient(http, "http://example.test").events("doc_1").toList()
 
-        assertEquals(listOf("node_start", "workflow_complete"), events.map { it.eventType.value })
+        assertEquals(listOf("node_start", "workflow_complete"), events.map { it.eventType.wire })
+        assertEquals(2, requests)
         assertEquals("1", http.lastRequest?.headers()?.firstValue("Last-Event-ID")?.orElse(null))
+    }
+
+    @Test
+    fun `a second overflow does not reopen the stream`() = runBlocking {
+        val overflowing = (
+            "id: 1\n" +
+                "event: node_start\n" +
+                "data: {\"event_type\":\"node_start\",\"step\":\"ingest\",\"doc_id\":\"doc_1\",\"data\":{}}\n\n" +
+                "event: overflow\n" +
+                "data: {\"reason\":\"the subscriber fell behind\",\"behind\":3,\"oldest_retained\":2}\n\n"
+            ).toByteArray()
+        // Two overflowing streams, and then an empty one: a client that
+        // reconnects without a bound would open a third request and finish
+        // on the empty one, so the request count is what tells the two
+        // behaviours apart.
+        val responses = ArrayDeque(
+            listOf(ByteArrayInputStream(overflowing), ByteArrayInputStream(overflowing))
+        )
+        var requests = 0
+        val http = StubHttpClient {
+            requests += 1
+            val next = responses.removeFirstOrNull()
+            CompletableFuture.completedFuture(
+                StubResponse(it, 200, next ?: ByteArrayInputStream(ByteArray(0)))
+            )
+        }
+
+        val events = SseClient(http, "http://example.test").events("doc_1").toList()
+
+        assertEquals(listOf("node_start", "node_start"), events.map { it.eventType.wire })
+        assertEquals(2, requests)
     }
 ```
 
@@ -1239,7 +1273,13 @@ reconnect carried the last id.
 
 **The behaviour asserted is what matters:** the client reads the `event:`
 field, recognises the overflow frame rather than failing on it, reconnects,
-and the reconnect carries `Last-Event-ID` with the last id it saw.
+and the reconnect carries `Last-Event-ID` with the last id it saw. The
+second test pins the bound: the client reconnects **once**, so a second
+overflow ends the stream rather than opening a third request.
+
+`EventType` implements `WireEnum`, whose property is `wire` — the exact
+string the value has on the wire. There is no `value` property, so the
+assertion reads `it.eventType.wire`.
 
 - [ ] **Step 2: Run the test to verify it fails**
 
@@ -1276,7 +1316,17 @@ and a method:
                 line.startsWith("event:") -> event = line.substring(6).trim()
                 line.startsWith("id:") -> id = line.substring(3).trim()
                 line.startsWith("data:") -> data.add(line.substring(5).removePrefix(" "))
-                line.isEmpty() -> return SseFrame(event, id, data.joinToString("\n"))
+                line.isEmpty() -> {
+                    if (data.isNotEmpty()) {
+                        return SseFrame(event, id, data.joinToString("\n"))
+                    }
+                    // A block with no data is a comment, and the SSE
+                    // specification dispatches nothing for it. It is read
+                    // past rather than turned into an empty frame the caller
+                    // would fail to decode.
+                    event = null
+                    id = null
+                }
             }
         }
     }
@@ -1304,60 +1354,98 @@ Replace `SseClient.events` with:
      * in an `overflow` frame before it closes. That is not a failure: the run
      * is still going, so the client reopens the stream with the id of the last
      * frame it received and carries on. It does that once -- a retry loop needs
-     * a backoff and a budget, which is a different decision.
+     * a backoff and a budget, which is a different decision -- so a second
+     * overflow ends the stream, and the caller sees a run that stopped short.
      */
     fun events(docId: String): Flow<WorkflowEvent> = channelFlow {
         var lastEventId: String? = null
-        while (true) {
-            val request = buildRequest(docId, lastEventId)
-            val response = http.sendCancellable(request, HttpResponse.BodyHandlers.ofInputStream())
-            val body = response.body()
-            var overflowed = false
+        var reconnected = false
+        // The body of the response being read now. A blocked read is not
+        // interrupted by cancellation, so cancellation reaches it by closing
+        // the body; the holder is how the closing thread finds it.
+        val open = AtomicReference<InputStream?>(null)
+        val worker = launch(Dispatchers.IO) {
             try {
-                body.use {
-                    if (response.statusCode() != 200) {
-                        throw BackendError.Refused(response.statusCode(), "the event stream was refused")
-                    }
-                    val reader = BufferedReader(InputStreamReader(it, StandardCharsets.UTF_8))
-                    while (true) {
-                        val frame = readFrame(reader) ?: break
-                        when (frame.event) {
-                            "overflow" -> {
-                                // The run is still going and this subscriber fell
-                                // behind. The stream is reopened with the last
-                                // frame received, so the frames it missed are
-                                // replayed rather than lost.
-                                overflowed = true
-                                break
+                while (true) {
+                    val request = buildRequest(docId, lastEventId)
+                    var overflowed = false
+                    try {
+                        val response = http.sendCancellable(request, HttpResponse.BodyHandlers.ofInputStream())
+                        val body = response.body()
+                        open.set(body)
+                        // A cancellation that lands between the response
+                        // completing and the body being published would
+                        // otherwise leave the body open with nobody to close
+                        // it, and the blocked read below would never end.
+                        if (!isActive) {
+                            body.close()
+                        }
+                        body.use { stream ->
+                            if (response.statusCode() != 200) {
+                                throw BackendError.Refused(response.statusCode(), "the event stream was refused")
                             }
-                            "gap" -> {
-                                // The server could not give this client the frames it
-                                // asked for, and named the hole. The authoritative
-                                // state is fetched separately; the stream continues.
-                            }
-                            else -> {
-                                frame.id?.let { lastEventId = it }
-                                send(decode(frame.data))
+                            val reader = BufferedReader(InputStreamReader(stream, StandardCharsets.UTF_8))
+                            while (true) {
+                                val frame = readFrame(reader) ?: break
+                                when (frame.event) {
+                                    "overflow" -> {
+                                        // The run is still going and this subscriber fell
+                                        // behind. The stream is reopened with the last
+                                        // frame received, so the frames it missed are
+                                        // replayed rather than lost.
+                                        overflowed = true
+                                        break
+                                    }
+                                    "gap" -> {
+                                        // The server could not give this client the frames it
+                                        // asked for, and named the hole. The hole cannot be
+                                        // filled from the stream: the document's state is
+                                        // the authoritative record, and the stream carries
+                                        // on with what comes next.
+                                    }
+                                    else -> {
+                                        frame.id?.let { lastEventId = it }
+                                        send(decode(frame.data))
+                                    }
+                                }
                             }
                         }
+                    } catch (cause: CancellationException) {
+                        throw cause
+                    } catch (cause: IOException) {
+                        throw BackendError.Unreachable(request.uri().toString(), cause)
+                    } finally {
+                        open.set(null)
                     }
+                    // One reconnect is what this slice covers. A second overflow
+                    // ends the stream: the frames between are gone, and a
+                    // retry loop needs a backoff and a budget, which is a
+                    // different decision.
+                    if (!overflowed || reconnected) {
+                        break
+                    }
+                    reconnected = true
                 }
+                close()
             } catch (cause: CancellationException) {
                 throw cause
-            } catch (cause: IOException) {
-                throw BackendError.Unreachable(request.uri().toString(), cause)
+            } catch (cause: BackendError) {
+                close(cause)
             }
-            if (!overflowed) {
-                break
-            }
+        }
+        awaitClose {
+            worker.cancel()
+            open.get()?.close()
         }
     }
 ```
 
-The loop lives in the `channelFlow`'s producer scope, so the producer is
-cancelled with the flow and `awaitClose` is not needed: the producer owns
-the response body, and `body.use` closes it on every path out of the read
-loop.
+The body is read on a worker, not in the producer scope. A blocked read is
+not interrupted by cancelling the coroutine that made it, so cancellation
+reaches the read by closing the body: `awaitClose` holds the body in an
+`AtomicReference` and closes it, which unblocks the reader. The worker's
+own liveness is checked as soon as it publishes the body, so a cancellation
+that arrives in the moment before the body is published closes it too.
 
 Add the request builder next to it:
 
@@ -1437,10 +1525,12 @@ expects.
 
 **Ruling.** The client's frame type carries the `event:` name, the `id:` and
 the `data:` text, and the control frames are recognised by their name —
-which is what the plan's Step 3 already does. The implementation must not
-assume that every frame carries an `id:` or that every `data:` is an event
-envelope: a frame with no `id:` is a control frame, and a `data:` that does
-not decode as an event envelope is one too.
+which is what the plan's Step 3 already does. The name is the discriminator:
+the server names every frame it writes, and the two control frames are
+`overflow` and `gap`. A frame the client does not recognise is a
+disagreement between the two halves of the system, and it is reported rather
+than guessed at — the absence of an `id:` is not a licence to guess that a
+frame is a control frame.
 
 ### Correction 11 — Task 4: the brief's Step 4 code deadlocks the pre-existing cancellation test
 
@@ -1478,6 +1568,68 @@ brief's test does not compile.
 
 **Ruling.** The assertion uses `it.eventType.wire`, which is what the JSON
 codec writes and what travels.
+
+### Correction 13 — Task 4: the review of the delivered client
+
+Added after the task review of Task 4. The reviewer's verdict was that the
+frame reading, the id tracking, the `Last-Event-ID` header and the credential
+handling were correct and faithfully matched to the server's wire format, and
+that the deliberate departure from the brief's defective Step 4 code was the
+right call. What it found was an unbounded reconnect and a narrow cancellation
+window.
+
+**Finding 1 — the reconnect was unbounded.** The delivered loop broke only
+when the stream did *not* end with an overflow, so a server that overflowed
+again reopened the stream again, and again. Blueprint §9 is binding: *"It
+does not reconnect in a loop. A retry loop needs a backoff, a budget and some
+operator-visible state about how many attempts have been made, and that is a
+different design. One reconnect on an overflow is what this slice covers."*
+The class docstring's *"It does that once"* claimed a behaviour the code did
+not have.
+
+**Ruling 1.** The client reconnects at most once. A second overflow ends the
+stream. The caller is not misled: `StudioController` already reports *"The
+event stream ended before the run completed."* when the flow ends without a
+terminal frame, so a run that stopped short is reported as such rather than
+as a run that finished. A test pins the bound by counting the requests.
+
+**Finding 2 — a cancellation landing between the response arriving and the
+body being published hung the flow.** The worker published the body to the
+`AtomicReference` after the response completed; a cancellation in that window
+left `awaitClose` with nothing to close, and the worker's blocked read was
+never interrupted.
+
+**Ruling 2.** After publishing the body, the worker checks its own liveness
+and closes the body if the scope has already been cancelled, so either
+`awaitClose` sees the body or the worker sees the cancellation.
+
+**Finding 3 — a blank line with no data became an empty frame.** The
+pre-existing reader required `data.isNotEmpty()` before treating a blank
+line as a frame terminator, and the SSE specification dispatches nothing for
+an empty data buffer. A stray comment block would have failed the whole run
+with `BackendError.Malformed` where it used to be read past.
+
+**Ruling 3.** A blank line ends a frame only when there is data. A block with
+no data is read past, and the event name and id it carried are discarded
+with it.
+
+**Finding 4 — the gap comment overstated what the code does.** It said *"The
+authoritative state is fetched separately"*, and this code fetches nothing.
+
+**Ruling 4.** The comment says what is true: the hole cannot be filled from
+the stream, the document's state is the authoritative record, and the stream
+carries on with what comes next.
+
+**Finding 5 — the overflow test pinned the request count only implicitly.** A
+third request surfaced as a `NoSuchElementException` from the stub rather
+than as an assertion failure.
+
+**Ruling 5.** The test counts the requests and asserts the number.
+
+**Finding 6 — Correction 10's ruling was looser than the implementation.** It
+said a frame with no `id:` is a control frame; the name is the discriminator.
+
+**Ruling 6.** Correction 10 is corrected above.
 
 ---
 
