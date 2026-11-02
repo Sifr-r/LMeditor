@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
+import time
 from typing import Any
 
 import httpx
@@ -66,10 +67,13 @@ STREAM_READ_TIMEOUT: float = 10.0
 
 #: How long the wait for the worker's human review may last, and how often it
 #: looks. The worker loads model weights on a cold start, so the budget is
-#: measured in tens of seconds rather than in milliseconds: 6000 looks at
-#: 5ms apart is half a minute.
+#: measured in tens of seconds rather than in milliseconds. It is a deadline
+#: rather than a count of looks because a sleep lasts the platform's timer
+#: granularity rather than the interval asked for: on Windows a 5ms sleep
+#: takes about 14ms, so a count of looks would buy a different amount of
+#: time on each platform.
+HITL_WAIT_TIMEOUT: float = 60.0
 HITL_WAIT_INTERVAL: float = 0.005
-HITL_WAIT_ATTEMPTS: int = 6000
 
 
 def _chunk() -> SourceChunk:
@@ -491,7 +495,7 @@ def test_a_reconnect_the_session_can_no_longer_serve_is_told_the_gap() -> None:
         assert "id" not in gap_frame
         gap = json.loads(gap_frame["data"])
         assert gap["requested_after"] == 999
-        # The resume could not be served completely, and the session counted it.
+        # The resume was answered with a gap frame, and the session counted it.
         assert session.gaps_served == 1
     finally:
         # The registry is process-wide: the session this test opened is taken
@@ -759,11 +763,12 @@ async def _wait_until_pending(session: WorkflowSession) -> None:
     The wait is for a *worker*, not for an in-process condition: the worker
     loads model weights before it reaches the gate, so a cold start takes
     tens of seconds where an in-process condition would take milliseconds.
-    The budget is therefore measured in seconds. It stays bounded, so a
-    worker that never opens a review fails the test instead of hanging the
-    suite.
+    The budget is a deadline, so it is the same wall clock on every platform.
+    It stays bounded, so a worker that never opens a review fails the test
+    instead of hanging the suite.
     """
-    for _ in range(HITL_WAIT_ATTEMPTS):
+    deadline = time.monotonic() + HITL_WAIT_TIMEOUT
+    while time.monotonic() < deadline:
         if session.hitl_pending:
             return
         await asyncio.sleep(HITL_WAIT_INTERVAL)

@@ -1000,6 +1000,11 @@ does not. A request the session never had is named as a gap too.
         A client that names a frame the session never published is owed it
         too, and is named in the same way: the server serves what it
         remembers and says what it does not have.
+
+        This is a query: it reads the session's history and counts nothing.
+        The count of the resumes that were answered with a gap lives in
+        :meth:`note_gap_served`, which the one place that serves a gap
+        calls.
         """
         oldest = self._oldest_retained_id()
         latest = self._latest_event_id
@@ -1007,8 +1012,16 @@ does not. A request the session never had is named as a gap too.
         ahead_of_session = last_event_id > latest
         if not (rotated_out or ahead_of_session):
             return None
-        self.gaps_served += 1
         return {"requested_after": last_event_id, "oldest_retained": oldest}
+
+    def note_gap_served(self) -> None:
+        """Count one resume that was answered with a gap frame.
+
+        The count belongs to the serving, not to the asking: a caller that
+        asks whether a gap exists has not served one. The route calls this
+        exactly once, for the one resume it answered with a gap frame.
+        """
+        self.gaps_served += 1
 ```
 
 A client that is exactly caught up — naming the newest frame the session
@@ -1358,11 +1371,43 @@ pins, and this reader keeps it.
 
 - [ ] **Step 4: Read the control frames, track the last id, and reconnect**
 
+Add the message type beside the client:
+
+```kotlin
+/**
+ * One thing the event stream carried.
+ *
+ * The stream carries two kinds of thing: the workflow's events, and the
+ * server's notices about the stream itself. The notices are not events and
+ * cannot be decoded as ones -- a notice that names a gap in the stream is
+ * exactly the thing a caller most needs to be told about, so it is delivered
+ * rather than discarded.
+ */
+sealed interface SseMessage {
+    /** A workflow event, exactly as the backend published it. */
+    data class Event(val event: WorkflowEvent) : SseMessage
+
+    /**
+     * The server could not serve the frames the client asked to resume
+     * after: they have left the session's memory and cannot be given.
+     */
+    data class Gap(val requestedAfter: Int, val oldestRetained: Int) : SseMessage
+
+    /**
+     * The subscriber fell behind. The server ended the stream and the client
+     * reopened it with the id of the last frame it received; `behind` is the
+     * number of frames the server held back from it.
+     */
+    data class Overflow(val behind: Int, val oldestRetained: Int) : SseMessage
+}
+```
+
 Replace `SseClient.events` with:
 
 ```kotlin
     /**
-     * The frames of one run, in the order the server published them.
+     * The frames of one run, in the order the server published them, and the
+     * server's notices about the stream itself.
      *
      * The flow throws [BackendError] when the stream cannot be read at all.
      * A frame the client cannot decode is a genuine disagreement between the
@@ -1375,8 +1420,12 @@ Replace `SseClient.events` with:
      * frame it received and carries on. It does that once -- a retry loop needs
      * a backoff and a budget, which is a different decision -- so a second
      * overflow ends the stream, and the caller sees a run that stopped short.
+     *
+     * The two control frames are the server's word about the stream, and they
+     * are delivered to the caller rather than dropped: a caller that cannot
+     * see them cannot tell a run that lost frames from one that did not.
      */
-    fun events(docId: String): Flow<WorkflowEvent> = channelFlow {
+    fun events(docId: String): Flow<SseMessage> = channelFlow {
         var lastEventId: String? = null
         var reconnected = false
         // The body of the response being read now. A blocked read is not
@@ -1415,7 +1464,9 @@ Replace `SseClient.events` with:
                                         // The run is still going and this subscriber fell
                                         // behind. The stream is reopened with the last
                                         // frame received, so the frames it missed are
-                                        // replayed rather than lost.
+                                        // replayed rather than lost. The caller is told
+                                        // how many frames the server held back.
+                                        send(decodeOverflow(frame.data))
                                         overflowed = true
                                         break
                                     }
@@ -1424,11 +1475,13 @@ Replace `SseClient.events` with:
                                         // asked for, and named the hole. The hole cannot be
                                         // filled from the stream: the document's state is
                                         // the authoritative record, and the stream carries
-                                        // on with what comes next.
+                                        // on with what comes next. The caller is told what
+                                        // was missed.
+                                        send(decodeGap(frame.data))
                                     }
                                     else -> {
                                         frame.id?.let { lastEventId = it }
-                                        send(decode(frame.data))
+                                        send(SseMessage.Event(decode(frame.data)))
                                     }
                                 }
                             }
@@ -1759,6 +1812,69 @@ The ledger records what the slice closed and what it did not, and the
 readiness list is renumbered after it. The verification numbers are the
 ones the gate actually produced."
 ```
+
+---
+
+### Correction 15 — the whole-branch review, and the fix round it sent back
+
+Added after the final whole-branch review of the slice, which returned FAIL
+with one Important finding and five Minors after every task had passed its
+own review. The findings and the controller's rulings are recorded in
+`ARCHITECTURE.md` §33.7; this correction records what the plan's steps must
+now say, so that a reader following them writes the implementation that
+shipped.
+
+**Finding 1 (Important) — the client threw away what the server told it.**
+The server named what a client missed and sent it in the control frame's
+`data:`; the client read the frame, recognised the name, and dropped the
+payload. Its API returned `Flow<WorkflowEvent>`, so there was no channel by
+which a notice could reach the caller, and the run ended looking successful
+while the state was silently short — and for a `token_delta` the document
+text was silently missing frames, which the reducer's suffix test cannot
+catch, because it catches a repeated frame and not a missing one.
+
+**Ruling 1.** The control frames are delivered to the caller as messages of
+their own. Task 4's Step 4 above is rewritten: `events` returns
+`Flow<SseMessage>`, the two control frames become `SseMessage.Gap` and
+`SseMessage.Overflow`, and a sequence frame becomes `SseMessage.Event`. A
+control frame whose payload cannot be read is `BackendError.Malformed` — the
+same discipline the event frames already follow, and the same ruling as
+Correction 10.
+
+**Finding 2 and 3 (Minor) — `frames_withheld` counted the wrong quantity.**
+The blueprint defines it as *"frames a subscriber was never given because it
+fell behind"*, and the implementation counted the frames that had left the
+history — the ones gone for good. The blueprint's own example payload settles
+the meaning: the count is greater than the oldest retained frame, which is
+only true of how far behind the subscriber is.
+
+**Ruling 2.** `SubscriberOverrun.frames_missed` becomes the session's latest
+id less the subscriber's position, and both the counter and the payload's
+`behind` carry it. The frames permanently gone stay derivable from the
+oldest retained frame.
+
+**Finding 4 (Minor) — the gap payload names no hole in the ahead-of-session
+case.** The payload shape is fixed by blueprint §5 and the one-rule gap frame
+was the human partner's ruling, so the wire does not change. What changes is
+that the client no longer guesses: the caller distinguishes "frames are gone"
+from "the client resumed ahead of the session and is waiting".
+
+**Finding 5 (Minor) — `gap_before()` was a query that counted.** Task 3's
+Step 5 above is rewritten: `gap_before` counts nothing, and the counting
+belongs to `note_gap_served()`, which the route calls at the one place a gap
+is served.
+
+**Observation — a cold-start flake in an unrelated test.**
+`test_approval_resumes_the_real_graph_and_completes` waited two seconds for
+a worker that loads model weights — 26.9 seconds on a cold start. The budget
+is a **deadline**, not a count of looks, because a sleep lasts the platform's
+timer granularity rather than the interval asked for: on Windows a 5 ms sleep
+takes about 14 ms.
+
+**Finding 6 (Minor, documentation) — `gaps_served` counted more than the
+blueprint said.** Blueprint §7's row is widened to *"Resumes that were
+answered with a gap frame"*, which is what the counter counts in both
+directions of the one gap rule.
 
 ---
 

@@ -1403,8 +1403,9 @@ class StudioController(
      * which one it is rather than claiming a loss that did not happen.
      */
     private fun gapNotice(gap: SseMessage.Gap): String {
-        // The bounds are computed as longs: a client may name a frame id
-        // beyond the range of an int, and the notice must not wrap around.
+        // The bounds are computed as longs: the ids the client names are
+        // ints, and the frame after the largest of them is one past the
+        // range of an int, so the addition would wrap.
         val firstMissed = gap.requestedAfter.toLong() + 1
         val lastMissed = gap.oldestRetained.toLong() - 1
         if (lastMissed < firstMissed) {
