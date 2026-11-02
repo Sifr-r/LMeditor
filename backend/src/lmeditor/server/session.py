@@ -65,47 +65,80 @@ def scorecard_payload(
     return scorecard.model_dump(mode="json")
 
 
-class EventSubscription:
-    """One SSE subscriber's private view of a session's event stream.
+class SubscriberOverrun(RuntimeError):
+    """A subscriber fell behind the session's history.
 
-    Each subscription owns its buffer, so N concurrent streams on one document
-    each observe the *complete* frame sequence instead of dividing it. The
-    buffer is seeded from the session's bounded replay buffer at subscription
-    time, and the session delivers the terminal ``None`` sentinel to every live
-    subscription, so no subscriber is left waiting on a queue that will never be
-    written to again.
-
-    The buffer is unbounded on purpose: a bounded one would either block the
-    publishing worker (stalling every other stream) or silently drop frames a
-    slow client never received. A client that stops reading is released by
-    :meth:`WorkflowSession.unsubscribe`, after which nothing is queued for it.
+    The frames it has not read have left the history, so they cannot be
+    given to it. The subscriber is disconnected and told to reconnect, and
+    the reconnect is served what the session still remembers and told about
+    the rest.
     """
 
-    def __init__(self, subscription_id: int, frames: list[WorkflowEvent | None]) -> None:
+    def __init__(self, subscription_id: int, position: int, oldest_retained: int) -> None:
         self.subscription_id = subscription_id
-        self._frames: asyncio.Queue[WorkflowEvent | None] = asyncio.Queue()
-        for frame in frames:
-            self._frames.put_nowait(frame)
+        self.position = position
+        self.oldest_retained = oldest_retained
+        self.frames_missed = oldest_retained - position - 1
+        super().__init__(
+            f"subscriber {subscription_id} fell behind at frame {position}; "
+            f"the session still remembers from frame {oldest_retained}"
+        )
 
-    def deliver(self, frame: WorkflowEvent | None) -> None:
-        """Buffer one frame for this subscriber; never blocks, never raises."""
-        self._frames.put_nowait(frame)
 
-    async def get(self) -> WorkflowEvent | None:
-        """Await the next frame, or ``None`` for the terminal sentinel."""
-        return await self._frames.get()
+class EventSubscription:
+    """One SSE subscriber's place in a session's event stream.
+
+    A subscriber holds no frames. It holds the id of the last frame it has
+    read, and the session's history is the buffer it reads from: the frames
+    it has not read are found there rather than copied here. A subscriber
+    that stops reading therefore accumulates nothing -- it simply stops
+    advancing -- and the session notices when the frames it has not read
+    have left the history.
+
+    Each subscription has its own wake-up, so that publishing wakes every
+    subscriber and no subscriber's wake-up can be consumed by another.
+    """
+
+    def __init__(
+        self,
+        subscription_id: int,
+        position: int,
+        session: WorkflowSession | None = None,
+    ) -> None:
+        self.subscription_id = subscription_id
+        #: The id of the last frame this subscriber has read. The frames it
+        #: has not read are those after it.
+        self.position = position
+        self._wakeup = asyncio.Event()
+        #: The session whose history this subscriber reads. It is a reference
+        #: to the one bounded history, not a copy of it.
+        self._session = session
+
+    def wake(self) -> None:
+        """Tell the subscriber that something has been published."""
+        self._wakeup.set()
+
+    async def wait(self) -> None:
+        """Wait until the subscriber is woken, then clear the wake-up.
+
+        Clearing after the wait rather than before it is what keeps a
+        publish that lands between the subscriber's check and its wait
+        from being lost: the event stays set, so the wait returns at once.
+        """
+        await self._wakeup.wait()
+        self._wakeup.clear()
 
     def drain(self) -> list[WorkflowEvent]:
-        """Pop every frame buffered so far, stopping at the terminal sentinel."""
-        drained: list[WorkflowEvent] = []
-        while True:
-            try:
-                frame = self._frames.get_nowait()
-            except asyncio.QueueEmpty:
-                return drained
-            if frame is None:
-                return drained
-            drained.append(frame)
+        """The frames published since this subscriber last read, without waiting.
+
+        A subscriber holds no frames of its own, so the frames it has not
+        read are the ones the session's history still holds. Reading them
+        advances the position exactly as handing them to the subscriber
+        would, so the next read continues where this one stopped.
+        """
+        if self._session is None:
+            return []
+        return self._session.drain(self)
 
 
 class WorkflowSession:
@@ -150,7 +183,15 @@ class WorkflowSession:
         # was consumed blocked forever on an empty queue.
         self._subscribers: dict[int, EventSubscription] = {}
         self._next_subscription_id: int = 0
-        self._history: deque[WorkflowEvent] = deque(maxlen=STREAM_REPLAY_BUFFER)
+        #: The frames the session remembers, with the id each was published
+        #: under. This history is the only copy of a frame: a subscriber
+        #: reads from it by position rather than holding a copy of the
+        #: frames it has not read yet.
+        self._history: deque[tuple[int, WorkflowEvent]] = deque(maxlen=STREAM_REPLAY_BUFFER)
+        #: The id the next published frame will carry. Ids start at 1 so
+        #: that a subscriber that has read nothing is at position 0 and the
+        #: first frame it is owed is frame 1.
+        self._next_event_id: int = 1
         self._terminal_event: WorkflowEvent | None = None
         #: Frames refused because they followed the terminal frame. Counted
         #: rather than dropped silently.
@@ -175,18 +216,22 @@ class WorkflowSession:
         return len(self._subscribers)
 
     async def subscribe(self) -> EventSubscription:
-        """Register a subscriber and seed it with the replay buffer.
+        """Register a subscriber at a position in the session's history.
+
+        A subscriber starts at the oldest frame the session still holds, so
+        it is given the recent history and the live frames that follow.
 
         A subscription on an already-closed session comes back **already
-        terminated**: the buffer ends with the terminal frame and the ``None``
-        sentinel, so the caller is closed deterministically instead of waiting
-        on a queue nobody will write to again. Such a subscription is not
-        registered for fan-out.
+        terminated**: the history ends with the terminal frame and there is
+        nothing after it, so the caller is closed deterministically instead
+        of waiting for a frame nobody will publish. Such a subscription is
+        not registered for fan-out.
         """
         self._next_subscription_id += 1
         subscription = EventSubscription(
             subscription_id=self._next_subscription_id,
-            frames=self._replay_frames(),
+            position=self._oldest_retained_id() - 1,
+            session=self,
         )
         if not self._terminated:
             self._subscribers[subscription.subscription_id] = subscription
@@ -200,33 +245,96 @@ class WorkflowSession:
         """
         self._subscribers.pop(subscription.subscription_id, None)
 
-    def _replay_frames(self) -> list[WorkflowEvent | None]:
-        """Frames a new subscriber receives before any live frame.
+    @property
+    def _latest_event_id(self) -> int:
+        """The id of the most recently published frame."""
+        return self._next_event_id - 1
 
-        A closed session's history already ends with the terminal frame, so the
-        sentinel is appended exactly once; a session whose terminal frame is
-        missing from its history (a guard suppressed it) gets the frame first,
-        so a late subscriber still sees a terminal outcome.
+    def _oldest_retained_id(self) -> int:
+        """The id of the oldest frame the session still remembers.
+
+        A session that has published nothing yet has nothing to remember,
+        and its oldest frame is the one after the last it published.
         """
-        frames: list[WorkflowEvent | None] = list(self._history)
-        if not self._terminated:
-            return frames
-        terminal = self._terminal_event
-        if terminal is not None and (not frames or frames[-1] is not terminal):
-            frames.append(terminal)
-        frames.append(None)
-        return frames
+        if self._history:
+            return self._history[0][0]
+        return self._latest_event_id + 1
+
+    def _frame_after(self, position: int) -> tuple[int, WorkflowEvent] | None:
+        """The frame after the given id, if the history still holds it.
+
+        The history is ordered by id and the ids are contiguous, so the
+        frame is found by index rather than by a search.
+        """
+        if not self._history:
+            return None
+        oldest = self._history[0][0]
+        target = position + 1
+        if target < oldest:
+            return None
+        index = target - oldest
+        if index >= len(self._history):
+            return None
+        return self._history[index]
+
+    async def next_frame(
+        self, subscription: EventSubscription
+    ) -> tuple[int, WorkflowEvent] | None:
+        """The frame after the subscriber's position, or ``None`` at the end.
+
+        ``None`` means the stream is finished: the session published its
+        terminal frame and the subscriber has read it.
+
+        The subscriber's position advances only when a frame is handed to
+        it, which is what makes a subscriber that stops reading visible: it
+        stops advancing, and the frames it has not read leave the history
+        around it.
+        """
+        while True:
+            frame = self._frame_after(subscription.position)
+            if frame is not None:
+                subscription.position = frame[0]
+                return frame
+            # The frame the subscriber is owed is not in the history. Either
+            # the session has not published it yet, or the history has
+            # rotated past it and the subscriber has missed frames.
+            if self._oldest_retained_id() > subscription.position + 1:
+                raise SubscriberOverrun(
+                    subscription.subscription_id,
+                    subscription.position,
+                    self._oldest_retained_id(),
+                )
+            if self._terminated:
+                return None
+            await subscription.wait()
+
+    def drain(self, subscription: EventSubscription) -> list[WorkflowEvent]:
+        """The frames published since the subscriber last read, without waiting.
+
+        The frames are the ones the session's history still holds, so a
+        subscriber that has fallen behind the history is told so rather
+        than handed a shortened sequence.
+        """
+        oldest = self._oldest_retained_id()
+        if oldest > subscription.position + 1:
+            raise SubscriberOverrun(subscription.subscription_id, subscription.position, oldest)
+        drained: list[WorkflowEvent] = []
+        while True:
+            frame = self._frame_after(subscription.position)
+            if frame is None:
+                return drained
+            subscription.position = frame[0]
+            drained.append(frame[1])
 
     async def _close_subscribers(self) -> None:
-        """Deliver the terminal sentinel to every live subscriber.
+        """Wake every live subscriber so each one observes the close.
 
         Every stream must observe the close. The single shared sentinel of the
         previous design could be consumed by one subscriber, leaving the others
         blocked on an empty queue for good.
         """
         for subscription in tuple(self._subscribers.values()):
-            subscription.deliver(None)
-        self._subscribers.clear()
+            subscription.wake()
 
     async def publish_event(self, event: WorkflowEvent) -> None:
         """Publish an event to every live subscriber and to the replay buffer.
@@ -250,9 +358,10 @@ class WorkflowSession:
             self.terminal_event_published = True
             self._terminal_event = event
 
-        self._history.append(event)
+        self._history.append((self._next_event_id, event))
+        self._next_event_id += 1
         for subscription in tuple(self._subscribers.values()):
-            subscription.deliver(event)
+            subscription.wake()
 
     async def _publish_terminal(self, event: WorkflowEvent) -> None:
         """Publish a terminal frame unless one was already published.
@@ -467,6 +576,7 @@ __all__ = [
     "HITLDecisionMissingError",
     "HITLReviewNotPendingError",
     "SessionManager",
+    "SubscriberOverrun",
     "WorkflowSession",
     "session_manager",
 ]

@@ -79,24 +79,30 @@ def _types(frames: list[WorkflowEvent]) -> list[EventType]:
     return [frame.event_type for frame in frames]
 
 
-async def _collect(subscription: EventSubscription) -> list[WorkflowEvent]:
-    """Read frames until the terminal sentinel. Bound by the caller."""
+async def _collect(
+    session: WorkflowSession, subscription: EventSubscription
+) -> list[WorkflowEvent]:
+    """Read frames until the stream ends. Bound by the caller."""
     frames: list[WorkflowEvent] = []
     while True:
-        frame = await subscription.get()
+        frame = await session.next_frame(subscription)
         if frame is None:
             return frames
-        frames.append(frame)
+        frames.append(frame[1])
 
 
-async def _collect_bounded(subscription: EventSubscription) -> list[WorkflowEvent]:
-    """``_collect`` under a timeout: a missing sentinel fails the test.
+async def _collect_bounded(
+    session: WorkflowSession, subscription: EventSubscription
+) -> list[WorkflowEvent]:
+    """``_collect`` under a timeout: a stream that never ends fails the test.
 
     Under the old shared-queue design only one of several subscribers ever
     received the sentinel, so this is where such a regression surfaces as a
     ``TimeoutError`` instead of a hung suite.
     """
-    return await asyncio.wait_for(_collect(subscription), timeout=WAIT_TIMEOUT)
+    return await asyncio.wait_for(
+        _collect(session, subscription), timeout=WAIT_TIMEOUT
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -133,7 +139,7 @@ def test_two_concurrent_subscribers_each_receive_the_complete_sequence() -> None
         )
         await session.complete(sections=[{"section_id": "sec_1", "title": "Intro"}])
 
-        return await _collect_bounded(first), await _collect_bounded(second)
+        return await _collect_bounded(session, first), await _collect_bounded(session, second)
 
     first_frames, second_frames = asyncio.run(run())
 
@@ -164,7 +170,7 @@ def test_a_subscriber_that_joins_a_closed_session_is_terminated_at_once() -> Non
         # Nothing more can ever be published, so it is not registered for
         # fan-out; it is closed by the replay buffer instead.
         assert session.subscriber_count == 0
-        return await _collect_bounded(late)
+        return await _collect_bounded(session, late)
 
     frames = asyncio.run(run())
 
@@ -191,7 +197,7 @@ def test_a_mid_run_subscriber_receives_replayed_history_then_live_frames() -> No
 
         await session.publish_event(_event(doc_id, EventType.NODE_START, WorkflowStep.DRAFT_SECTIONS))
         await session.complete(sections=[{"section_id": "sec_1", "title": "Intro"}])
-        return replayed + await _collect_bounded(late)
+        return replayed + await _collect_bounded(session, late)
 
     frames = asyncio.run(run())
 
@@ -340,8 +346,13 @@ def test_failure_and_rejection_deliver_one_terminal_frame_and_no_completion() ->
         rejected_subscribers = [await rejected.subscribe(), await rejected.subscribe()]
         await rejected.terminate_rejected("the argument is unsupported")
 
-        for subscription in (*failed_subscribers, *rejected_subscribers):
-            assert _types(await _collect_bounded(subscription)) == [EventType.WORKFLOW_ERROR]
+        for session, subscription in (
+            (failed, failed_subscribers[0]),
+            (failed, failed_subscribers[1]),
+            (rejected, rejected_subscribers[0]),
+            (rejected, rejected_subscribers[1]),
+        ):
+            assert _types(await _collect_bounded(session, subscription)) == [EventType.WORKFLOW_ERROR]
         return failed, rejected
 
     failed, rejected = asyncio.run(run())
@@ -364,7 +375,7 @@ def test_a_terminal_transition_is_idempotent_for_every_subscriber() -> None:
         await session.complete(sections=[{"section_id": "sec_1", "title": "Intro"}])
         await session.complete(sections=[{"section_id": "sec_2", "title": "Other"}])
         await session.fail("must not overwrite a completed run")
-        return await _collect_bounded(subscriber)
+        return await _collect_bounded(session, subscriber)
 
     frames = asyncio.run(run())
 
@@ -375,6 +386,28 @@ def test_a_terminal_transition_is_idempotent_for_every_subscriber() -> None:
 # ---------------------------------------------------------------------------
 # Finding 13: a dropped client must not keep a queue alive
 # ---------------------------------------------------------------------------
+
+
+def test_a_subscriber_holds_no_frames_of_its_own() -> None:
+    """A subscriber's memory is a position, not a copy of the frames.
+
+    The session's history is the only copy. A subscriber that has not read
+    anything holds nothing, so a hundred stalled subscribers cost what one
+    stalled subscriber costs.
+    """
+    doc_id = "doc_fanout_cursor"
+
+    async def run() -> WorkflowSession:
+        session = await session_manager.create_session(doc_id=doc_id, topic="fanout")
+        await session.publish_event(_event(doc_id, EventType.NODE_START, WorkflowStep.INGEST))
+        subscription = await session.subscribe()
+        assert not hasattr(subscription, "_frames")
+        assert subscription.position == 0
+        return session
+
+    session = asyncio.run(run())
+
+    assert session.subscriber_count == 1
 
 
 def test_a_dropped_stream_unsubscribes_and_stops_accumulating() -> None:

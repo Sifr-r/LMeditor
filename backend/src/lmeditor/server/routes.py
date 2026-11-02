@@ -1052,13 +1052,13 @@ async def stream_workflow_events(doc_id: str) -> StreamingResponse:
 
     Each frame is ``event: <event_type>`` plus a ``data:`` JSON envelope of
     ``{event_type, step, doc_id, data}``. The terminal frames are exactly
-    ``workflow_complete`` and ``workflow_error``, followed by the ``None``
-    sentinel that closes this subscriber's stream.
+    ``workflow_complete`` and ``workflow_error``; the stream ends once the
+    subscriber has read the terminal frame.
 
     Every request gets its own subscription, so concurrent streams on one
     document each receive the full frame sequence instead of dividing it, and a
     stream attached to a finished session is closed immediately from the
-    session's replay buffer rather than waiting on a queue nobody writes to.
+    session's history rather than waiting on a frame nobody publishes.
     """
     session = await session_manager.get_session(doc_id)
     if not session:
@@ -1071,15 +1071,17 @@ async def stream_workflow_events(doc_id: str) -> StreamingResponse:
         subscription = await session.subscribe()
         try:
             while True:
-                event = await subscription.get()
-                if event is None:
-                    # Terminal sentinel: this stream is finished.
+                frame = await session.next_frame(subscription)
+                if frame is None:
+                    # The session is finished and this subscriber has read
+                    # the terminal frame.
                     break
+                event_id, event = frame
                 payload = json.dumps(event.model_dump(mode="json"))
                 yield f"event: {event.event_type.value}\ndata: {payload}\n\n"
         finally:
-            # A dropped client must not keep a queue alive or keep accumulating
-            # frames it will never read.
+            # A dropped client must not keep a subscription alive or keep a
+            # position that nothing will ever read.
             await session.unsubscribe(subscription)
 
     return StreamingResponse(
