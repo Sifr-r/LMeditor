@@ -200,6 +200,37 @@ class WordWriterTest {
     }
 
     @Test
+    fun `a custom style cannot inherit from itself and the omitted edge is reported`() {
+        val document = sampleDocument().copy(
+            styles = listOf(WordStyle(styleId = "Custom", name = "Custom style", basedOn = "Custom")),
+        )
+        val writer = WordWriter()
+        val bytes = writer.write(document)
+        val styles = partsOf(bytes).getValue("word/styles.xml")
+        val custom = styles.substringAfter("w:styleId=\"Custom\"").substringBefore("</w:style>")
+        assertTrue(custom.contains("<w:name w:val=\"Custom style\"/>"), custom)
+        assertFalse(custom.contains("w:basedOn"), custom)
+        assertEquals(listOf("style (Custom) inherits from itself"), writer.lastOmissions)
+        assertContentEquals(bytes, writer.write(document))
+        assertEquals(listOf("style (Custom) inherits from itself"), writer.lastOmissions)
+    }
+
+    @Test
+    fun `a custom style keeps its valid inheritance without an omission`() {
+        val document = sampleDocument().copy(
+            styles = listOf(
+                WordStyle(styleId = "Base", basedOn = "Normal"),
+                WordStyle(styleId = "Custom", basedOn = "Base"),
+            ),
+        )
+        val writer = WordWriter()
+        val styles = partsOf(writer.write(document)).getValue("word/styles.xml")
+        val custom = styles.substringAfter("w:styleId=\"Custom\"").substringBefore("</w:style>")
+        assertTrue(custom.contains("<w:basedOn w:val=\"Base\"/>"), custom)
+        assertTrue(writer.lastOmissions.isEmpty(), writer.lastOmissions.toString())
+    }
+
+    @Test
     fun `list items reference a numbering id`() {
         val parts = partsOf(WordWriter().write(sampleDocument()))
         assertTrue(parts.getValue("word/document.xml").contains("<w:numPr>"))

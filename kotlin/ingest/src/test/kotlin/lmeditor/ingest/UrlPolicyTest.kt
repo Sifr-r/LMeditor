@@ -432,6 +432,38 @@ class UrlPolicyTest {
             }
         }
     }
+
+    @Test
+    fun c1ControlsAreRefusedAtEverySourceBoundary() {
+        val base = java.nio.file.Paths.get(System.getProperty("java.io.tmpdir"), "lmeditor-c1")
+        val resolver = fixedResolver("93.184.216.34")
+        for (code in 0x80..0x9f) {
+            val control = code.toChar()
+            val boundaries = listOf<() -> Unit>(
+                { validateSourceId("source${control}id") },
+                { safeUploadPath("source", "paper${control}.txt", base) },
+                { assertPublicUrl("https://example.org/paper${control}text", resolver) },
+            )
+            for ((index, boundary) in boundaries.withIndex()) {
+                val failure = assertFailsWith<UnsafeSourceError>("U+${code.toString(16)} at boundary $index") {
+                    boundary()
+                }
+                assertTrue(failure.message!!.contains("control character"))
+                assertTrue(failure.message!!.contains("0x${code.toString(16)}"))
+            }
+        }
+    }
+
+    @Test
+    fun printableUnicodeIsPreservedAtEverySourceBoundary() {
+        val base = java.nio.file.Paths.get(System.getProperty("java.io.tmpdir"), "lmeditor-unicode")
+        val id = "caf\u00e9-\u65e5\u672c"
+        val filename = "$id.txt"
+        val url = "https://example.org/$id"
+        assertEquals(id, validateSourceId(id))
+        assertEquals(filename, safeUploadPath(id, filename, base).fileName.toString())
+        assertEquals(url, assertPublicUrl(url, fixedResolver("93.184.216.34")))
+    }
 }
 
 /** Return a resolver that answers with [addresses], whatever the host is. */

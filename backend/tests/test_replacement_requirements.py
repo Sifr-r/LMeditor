@@ -34,6 +34,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from collections import Counter
 from pathlib import Path
 from typing import Any, Final
 
@@ -333,3 +334,50 @@ def test_the_schema_declares_the_five_milestones() -> None:
 def test_the_status_vocabulary_is_the_four_blueprint_values(status: str) -> None:
     """The status vocabulary is exactly the four values the blueprint fixes."""
     assert status in load_registry()["statuses"]
+
+
+def test_the_workflow_matrix_rows_match_the_registry() -> None:
+    """The published matrix preserves every displayed field and row exactly once."""
+    matrix = (REPO_ROOT / "docs/replacement/supported-workflow-matrix.md").read_text(
+        encoding="utf-8"
+    )
+    rows = [
+        [cell.strip().strip("`") for cell in line.strip().strip("|").split("|")]
+        for line in matrix.splitlines()
+        if re.match(r"^\| `[A-Z]+\d?\.\d{2}` \|", line)
+    ]
+    expected = [
+        [
+            entry["id"],
+            entry["title"],
+            entry["stage"],
+            entry["owner"],
+            entry["status"],
+            entry["gate"],
+            "; ".join(entry["evidence"]) or "—",
+        ]
+        for entry in _entries()
+    ]
+    assert rows == expected, "workflow matrix rows differ from the requirement registry"
+
+
+def test_the_workflow_matrix_coverage_matches_the_registry() -> None:
+    """Status and track totals must reflect the same registry as the rows."""
+    matrix = (REPO_ROOT / "docs/replacement/supported-workflow-matrix.md").read_text(
+        encoding="utf-8"
+    )
+    entries = _entries()
+    for field, heading in (("track", "By track"), ("status", "By status")):
+        section = matrix.split(f"### {heading}\n", 1)[1].split("\n### ", 1)[0]
+        actual = {
+            cells[0].strip("`"): int(cells[1])
+            for line in section.splitlines()
+            if line.startswith("| ")
+            and len(cells := [cell.strip() for cell in line.strip("|").split("|")]) == 2
+            and cells[1].isdigit()
+        }
+        expected = dict(Counter(entry[field] for entry in entries))
+        if field == "status":
+            expected = {status: expected.get(status, 0) for status in load_registry()["statuses"]}
+        assert actual == expected, f"workflow matrix {field} totals differ from the registry"
+        assert f"| **Total** | **{len(entries)}** |" in section

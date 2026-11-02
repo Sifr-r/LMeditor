@@ -940,9 +940,8 @@ private fun NotebookStatusStrip(
         }
 
         val error = workspace.error ?: state.error
-        val notice = state.notice
-        when {
-            error != null -> Row(
+        if (error != null) {
+            Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
                 verticalAlignment = Alignment.CenterVertically,
@@ -962,8 +961,9 @@ private fun NotebookStatusStrip(
                     Text("Dismiss")
                 }
             }
-
-            notice != null -> Text(
+        }
+        state.statusNotices.forEach { notice ->
+            Text(
                 notice,
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,

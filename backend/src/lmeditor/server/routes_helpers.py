@@ -62,43 +62,20 @@ _WINDOWS_PATH = re.compile(r"(?<![A-Za-z0-9_])[A-Za-z]:[\\/][^\n\"',;|}\])]*")
 #: A UNC path: a host and the share on it.
 _UNC_PATH = re.compile(r"\\\\[^\s\"',;|}\])]+")
 
-#: A POSIX absolute path: a slash and at least two segments.
+#: HTTP(S) URLs, followed by POSIX absolute paths of any depth. Match a URL
+#: whole before looking for paths so IPv6 authorities and doubled slashes
+#: in its path survive. The replacement keeps that named group unchanged.
+#: A separate path following the URL is still matched and redacted.
 #:
-#: The path may not follow a word character or a slash, and that is what
-#: keeps the path of a URL -- ``https://example.com/path`` -- intact: there
-#: the slash follows the host, and the host is the caller's own and not a
-#: folder of the machine. A port is a number, so the slash that follows a
-#: port follows a word character too, and the path of a URL with a port in
-#: it survives for the same reason. A colon is no longer a bar: a path
-#: written as ``path:/data/x`` names a folder of the machine as much as
-#: ``path /data/x`` does, and the word character is what keeps the URLs that
-#: matter intact.
-#:
-#: A path written with a leading ``//`` is matched by the second rule,
-#: where a colon still is a bar: there the two slashes may be the scheme's
-#: own, so ``file:///data/books`` loses its path while
-#: ``https://example.com//path`` keeps its own.
-#:
-#: A single segment is not a path by itself: ``/etc`` is a root and
-#: ``/data`` may be one, but a lone slash-led word in a sentence is far
-#: more often a separator ("read/write") than a folder. The roots a server
-#: keeps files in are matched by :data:`_POSIX_ROOT` whatever else they
-#: are.
+#: A root such as ``/workspace`` is as private as a nested path; no known-root
+#: list can cover operator-configured storage. Word-internal separators such
+#: as ``read/write`` are excluded by the lookbehind. The double-slash rule
+#: retains the existing treatment of filesystem paths and file: URLs.
 _POSIX_PATH = re.compile(
-    r"(?<![A-Za-z0-9_/])/[^\s/\"',;|}\])]+(?:/[^\s\"',;|}\])]+)+"
-    r"|(?<![A-Za-z0-9_:])//[^\s/\"',;|}\])]+(?:/[^\s\"',;|}\])]+)+"
-)
-
-#: A POSIX absolute path that names one of the roots a server keeps files
-#: in, with no segment after it: a lone ``/etc``.
-#:
-#: A colon is no longer a bar here either, for the reason it is not a bar in
-#: :data:`_POSIX_PATH`: a root written as ``path:/etc`` is a root of the
-#: machine, and the word character is what keeps the URL intact.
-_POSIX_ROOT = re.compile(
-    r"(?<![A-Za-z0-9_/])"
-    r"/(?:home|Users|root|tmp|var|etc|usr|opt|bin|sbin|lib|lib64|mnt|media"
-    r"|srv|proc|sys|dev|private|Volumes)\b"
+    r"(?P<url>\bhttps?://[^\s\"',;|})]+)"
+    r"|(?<![A-Za-z0-9_/])/[^\s/\"',;|}\])]+(?:/[^\s\"',;|}\])]+)*/?"
+    r"|(?<![A-Za-z0-9_:])//[^\s/\"',;|}\])]+(?:/[^\s\"',;|}\])]+)*/?",
+    re.IGNORECASE,
 )
 
 #: A JVM stack frame: ``at lmeditor.bridge.BridgeMain.main(BridgeMain.kt:42)``.
@@ -175,8 +152,7 @@ def _without_machine_detail(text: str) -> str:
     text = _JVM_FRAME.sub("<frame>", text)
     text = _WINDOWS_PATH.sub("<path>", text)
     text = _UNC_PATH.sub("<path>", text)
-    text = _POSIX_PATH.sub("<path>", text)
-    text = _POSIX_ROOT.sub("<path>", text)
+    text = _POSIX_PATH.sub(lambda match: match.group("url") or "<path>", text)
     text = _JVM_CLASS.sub("<class>", text)
     text = _BARE_EXCEPTION.sub("<class>", text)
     return text

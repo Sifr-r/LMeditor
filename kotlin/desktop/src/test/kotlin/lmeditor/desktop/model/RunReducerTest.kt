@@ -19,6 +19,22 @@ import lmeditor.core.WorkflowStep
 class RunReducerTest {
 
     @Test
+    fun `status notices retain permanent loss alongside errors without duplicate messages`() {
+        val loss = "The event stream missed frame 2; the server no longer has them."
+        val state = StudioState(streamLossNotice = loss, notice = loss, error = "Connection failed")
+        assertEquals(listOf(loss), state.statusNotices)
+        assertEquals(listOf(loss, "Saved."), state.copy(notice = "Saved.").statusNotices)
+        assertEquals(listOf(loss), state.copy(notice = null).statusNotices)
+        assertEquals(
+            listOf(loss),
+            RunReducer.reduce(
+                state,
+                WorkflowEvent(EventType.WORKFLOW_COMPLETE, WorkflowStep.COMPLETE, "doc_1"),
+            ).statusNotices,
+        )
+    }
+
+    @Test
     fun `events for another document cannot mutate an active run`() {
         val state = StudioState(docId = "other_doc", status = "running")
         assertEquals(state, RunReducer.reduce(state, claimVerified("c1", "A claim.")))

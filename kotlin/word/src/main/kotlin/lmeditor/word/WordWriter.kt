@@ -931,7 +931,11 @@ class WordWriter(
         if (isDefault) builder.append(" w:default=\"1\"")
         builder.append(" w:styleId=\"${escapeXml(id)}\">")
         builder.append("<w:name w:val=\"${escapeXml(name)}\"/>")
-        if (!basedOn.isNullOrEmpty()) builder.append("<w:basedOn w:val=\"${escapeXml(basedOn)}\"/>")
+        if (basedOn == id) {
+            omit("style ($id) inherits from itself")
+        } else if (!basedOn.isNullOrEmpty()) {
+            builder.append("<w:basedOn w:val=\"${escapeXml(basedOn)}\"/>")
+        }
         val paragraphProperties = buildString {
             if (pPr.isNotEmpty()) append(pPr)
             if (!numId.isNullOrEmpty()) append("<w:numPr><w:numId w:val=\"${escapeXml(numId)}\"/></w:numPr>")

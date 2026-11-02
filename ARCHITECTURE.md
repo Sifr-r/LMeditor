@@ -1,5 +1,16 @@
 # LMeditor Architecture & System Ledger (Monorepo)
 
+> **Consolidated action plan — 2026-11-02:**
+> [`ACTION_PLAN.md`](ACTION_PLAN.md) is the single actionable documentation entry
+> point. Its single responsibility is to reconcile the project documents and
+> historical SDD reviews into ordered work, domain ownership, dependencies and
+> observable completion gates. It retains all 83 replacement requirement IDs,
+> their recorded statuses and evidence, identifies superseded findings and
+> unresolved contract wording, and inventories the reviewed sources. Original
+> contracts and evidence remain authoritative for their detailed rules. This
+> consolidation changes no runtime behavior, promotes no requirement status and
+> records no fresh release-gate pass.
+
 > **Product replacement roadmap — 2026-10-26:**
 > [`docs/product-replacement-roadmap.md`](docs/product-replacement-roadmap.md)
 > records the current Word/Obsidian/NotebookLM foundations, remaining workflow
@@ -5437,8 +5448,8 @@ behaviour the old client did not have.
 dropped by a caller that does not handle them. `StudioController` puts both
 notices in `StudioState.notice`, the channel the desktop already uses for
 "something happened the operator should know", and not in `StudioState.error`,
-because the run continued. The screens show a notice only when there is no
-error — see §33.8.
+because the run continued. The screens that show a run now render a notice
+alongside an error rather than one behind the other — see §33.8 and §35.
 
 The gap notice distinguishes the two cases the payload describes. When the
 frames really are gone it names them; when the client resumed **ahead** of
@@ -5611,17 +5622,17 @@ What it does **not** prove:
   it was. Nothing is dropped silently — the server's `gaps_served` and
   `frames_withheld` counters record both — but the operator sees one notice,
   not a history of them. A second field would fix it, and the slice did not
-  add one.
-- **The screens show a notice only when there is no error.** The desktop
-  renders `error` and `notice` in a `when` that lets one of them through, in
-  all three screens that show a run. A notice set while an error is present
-  therefore waits behind the error until the operator dismisses it. This is
-  the app's existing behaviour, in files the slice did not touch, and the run
-  no longer ends looking successful — the error says it did not. But the fact
-  the notice carries, how many frames were withheld, is not on the screen at
-  the same time as the error. **The server's three counters are not exposed
-  by any route**, so the notice is the operator's only channel, which is what
-  makes the two limits above worth naming.
+  add one. **The later action-plan batch did**: §35 records a permanent
+  `streamLossNotice` that a later notice or an error cannot overwrite.
+- **The server's three counters are not exposed by any route.** The desktop
+  used to render `error` and `notice` in a `when` that let one of them
+  through, so a notice set while an error was present waited behind the error
+  until the operator dismissed it; the action-plan batch changed that, and
+  §35 records that all four workspace strips now render notices alongside
+  errors. What the screen still cannot show is the count behind the notice,
+  how many frames were withheld, because **the server's three counters are not
+  exposed by any route**. The notice is the operator's only channel, which is
+  what makes the two limits above worth naming.
 - **`StudioController`'s *"the event stream ended before the run completed"*
   branch and `HttpTransport`'s `onCancellation` handler are outside this
   slice's files, and are not covered by a test in the desktop module.**
@@ -5703,4 +5714,109 @@ mutations, each reverted, each caught by a failing test:
 - the counter's arithmetic — the overflow test, which failed on the count;
 - the gap counter's ownership — the gap query's test, which counted two gaps
   where it should have counted none.
+
+## 34. Action-plan quick-fix batch — 2026-11-02
+
+Three independent lanes implemented the first bounded action-plan batch. No
+new runtime files, dependencies, schemas or public wire fields were introduced.
+Existing user changes to this ledger and the action plan were preserved.
+
+| File | Single responsibility in this batch |
+| --- | --- |
+| `docs/quick-fixes-blueprint.md` (new) | Define parallel ownership, scope and acceptance gates for this batch. |
+| `kotlin/ingest/src/main/kotlin/lmeditor/ingest/UrlPolicy.kt` | Reject C1 controls in the shared source-ID, upload-filename and URL validator using existing contextual `UnsafeSourceError`. |
+| `kotlin/ingest/src/test/kotlin/lmeditor/ingest/UrlPolicyTest.kt` | Add exhaustive U+0080–U+009F checks at three boundaries and preservation checks for printable Unicode. |
+| `kotlin/word/src/main/kotlin/lmeditor/word/WordWriter.kt` | Omit custom styles' self-inheritance edges and report the omission; preserve valid inheritance. |
+| `kotlin/word/src/test/kotlin/lmeditor/word/WordWriterTest.kt` | Add self-inheritance reporting, repeated-write determinism and valid-inheritance regressions. |
+| `docs/replacement/supported-workflow-matrix.md` | Reconcile all rendered registry fields and counts, including R.08 complete. |
+| `backend/tests/test_replacement_requirements.py` | Prevent row-field, ordering, duplication and coverage-total drift between matrix and registry. |
+| `ACTION_PLAN.md` | Record implemented work, verified matrix evidence and the executed Kotlin gate. |
+| `ARCHITECTURE.md` | Retain this scoped delivery record and its validation limits. |
+
+The ingestion change intentionally hardens the tier beyond the frozen Python
+reference's C0/DEL policy, as authorized by A3. The frozen witness is unchanged.
+VaultPath, NotebookPath and SourceArchive already use `isISOControl()` at the
+inspected boundaries. The two runtime patches address the corresponding §29.6
+findings, and the Kotlin regressions now pass; multi-style cycles and real
+Microsoft Word interoperability are not established by these edits.
+
+The new matrix checks failed against the stale matrix before correction; the
+focused requirement suite then passed **16 tests**. All 83 rows match the
+registry, which retains 46 not-started, 35 in-progress, one evidence-partial and
+one complete (R.08). No registry status changed.
+
+Kotlin verification is complete: the wrapper's cache lock under
+`C:\Users\rahin\.gradle` is released, and `.\gradlew.bat :ingest:test :word:test`
+from `kotlin` builds successfully and runs 316 tests (105 `:ingest`, 211 `:word`)
+with zero failures, including the new C1 boundary and custom-style regressions.
+No cache redirection or external writes were needed. The run was repeated on the
+merged tree — `main` fast-forwarded to `9a8418b` (PR #7) with the batches
+merged in — and passed there as well. No fresh release, installed-deployment
+or performance gate is claimed; A3 and A7 remain open.
+
+## 35. Medium-priority action-plan batch — 2026-11-02
+
+The action queue has no explicit severity tier. This batch selects bounded A3,
+A5 and A7 follow-ups, with ownership in `docs/medium-fixes-blueprint.md`.
+Three parallel lanes implemented independent changes; review kept public wire
+contracts, runtime dependencies and registry statuses unchanged.
+
+| File | Single responsibility in this batch |
+| --- | --- |
+| `docs/medium-fixes-blueprint.md` (new) | Define parallel file ownership, acceptance gates and exclusions. |
+| `backend/src/lmeditor/server/routes_helpers.py` | Redact unfamiliar POSIX roots while preserving explicit HTTP(S) URLs and useful error context. |
+| `backend/tests/server/test_disclosure_residuals.py` | Pin unknown roots, Unicode, file URLs, URL/path separation, IPv6, punctuation and idempotence. |
+| `kotlin/desktop/src/main/kotlin/lmeditor/desktop/model/StudioState.kt` | Hold one permanent-loss warning and expose at most two distinct visible notices. |
+| `kotlin/desktop/src/main/kotlin/lmeditor/desktop/model/StudioController.kt` | Preserve the first confirmed loss through later gaps/overflow/errors and clear it only after a new-run acknowledgement. |
+| `kotlin/desktop/src/main/kotlin/lmeditor/desktop/ui/DocumentsScreen.kt` | Render document workspace errors and notices independently. |
+| `kotlin/desktop/src/main/kotlin/lmeditor/desktop/ui/NotebookScreen.kt` | Render notebook workspace errors and notices independently. |
+| `kotlin/desktop/src/main/kotlin/lmeditor/desktop/ui/StudioScreen.kt` | Render studio errors and notices independently. |
+| `kotlin/desktop/src/main/kotlin/lmeditor/desktop/ui/VaultScreen.kt` | Render vault workspace errors and notices independently. |
+| `kotlin/desktop/src/test/kotlin/lmeditor/desktop/model/StudioControllerTest.kt` | Add three stream-loss lifecycle regressions, including failed starts and ahead-of-session gaps. |
+| `kotlin/desktop/src/test/kotlin/lmeditor/desktop/model/RunReducerTest.kt` | Add a bounded, deduplicated-notice presentation and reducer-preservation regression. |
+| `backend/scripts/build_replacement_matrix.py` (new) | Deterministically render the authoritative registry, or refuse output drift with `--check`. |
+| `backend/scripts/check_replacement_links.py` (new) | Check local document targets/fragments and confined registry file:line evidence addresses. |
+| `backend/scripts/check_inventory_cells.py` (new) | Check feature table shape and nonblank cells with escaped-pipe-aware parsing. |
+| `backend/scripts/check_compatibility_vocabulary.py` (new) | Check inventory and corpus capability statuses against the shared vocabulary. |
+| `backend/scripts/verify_corpus_digests.py` (new) | Verify file/tree digests while refusing corpus path escapes. |
+| `backend/tests/test_replacement_doc_tools.py` (new) | Pin deterministic/check-only rendering, malformed inputs, drift detection and working-directory independence. |
+| `docs/replacement/supported-workflow-matrix.md` | Retain generator output with every registry status/gate/evidence field preserved. |
+| `ACTION_PLAN.md` | Record scoped progress, remaining gates and reproducible tool commands. |
+| `docs/production-readiness.md` | Reconcile the maintained-tool and consumer-notice handoff with current evidence. |
+| `ARCHITECTURE.md` | Retain this delivery record and its limits. |
+
+The old POSIX redactor already covered unfamiliar multi-segment paths; its
+single-root allowlist leaked `/workspace` and similar configured roots. The
+new URL-first path matcher masks roots at any depth, keeps explicit HTTP(S)
+URLs including IPv6, and still masks file URLs and double-slash filesystem
+paths. Closing URL parentheses cannot conceal an adjacent absolute path.
+Seventeen focused adversarial cases pass; eleven cases failed against the
+pre-fix mechanism. Strict mypy passes for the changed helper on Windows.
+
+The broader `test_disclosure_residuals.py` and `test_error_disclosure.py` now
+run: all 32 residual cases pass in about 1.1 seconds, the error-disclosure
+suite passes, and the full backend suite passes **1,785 tests** with no
+failure. The recorded Windows event-loop socketpair hang does not reproduce on
+this machine, so the earlier diagnosis was environmental rather than a defect
+in the suites. No workaround was added.
+
+Permanent stream loss now occupies a separate bounded field. Later transient
+notices or errors cannot overwrite it, ahead-of-session gaps do not create
+false loss, and an unsuccessful generation request does not clear prior loss.
+All four screen status areas were reviewed. The four Kotlin regressions run and
+pass: `.\gradlew.bat :desktop:test` from `kotlin` executes 144 desktop tests
+with zero failures. First-warning retention is not a full notice history,
+frame-identity deduplication or snapshot reconciliation; those A5 behaviors
+remain open.
+
+Five maintained standard-library scripts replace the matrix renderer and four
+ignored auxiliary checks as documented invocations. The focused tooling and
+registry suites pass **33 tests**, including **17 new cases**. Strict mypy
+passes on all five tools and their new test file. All four live checkers report
+zero problems; renderer `--check` passes. Tests demonstrate drift rejection,
+changed file/tree detection, escape refusal and safe invocation from another
+working directory. The tools do not import ignored helpers. Evidence checks
+establish address validity, not semantic proof of a requirement. The stale
+hardcoded registry builder remains unpromoted; maintained registry regeneration
+is still open A7 work. No requirement status or broad release gate is promoted.
 
