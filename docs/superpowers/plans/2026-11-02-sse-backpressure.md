@@ -1107,6 +1107,86 @@ this tree (`lmeditor/notebooks/__init__.py`).
 The header's name is matched case-insensitively: `Last-Event-ID`,
 `last-event-id` and `LAST-EVENT-ID` all reach the route.
 
+### Correction 8 — Task 3: the proofs the plan left unassigned, and the rules the docstrings misstated
+
+Added after the task review of Task 3, which found the behaviour correct on
+every path it could exercise but two binding blueprint §10 proofs unpinned
+and two docstrings stating rules the code does not follow.
+
+**Finding 1 — the rotated-past resume is proved by nothing.** The plan's gap
+test names `Last-Event-ID: 999` on a session whose newest frame is 2 — the
+ahead-of-session case — while blueprint §6 and §10 require the rotated-past
+case: *"a client reconnecting with an id the session has rotated past is
+served the retained frames preceded by a `gap` frame naming the hole"*. The
+line `position = max(last_event_id, self._oldest_retained_id() - 1)` is the
+one that serves it, and nothing pinned it: replacing `max` with `min`, or
+dropping it, failed no test in the suite.
+
+**Ruling 1.** A test is added that proves it. It publishes enough frames that
+the history window rotates, reconnects with an id that has rotated out, and
+asserts that the `gap` frame comes first, that its payload names the hole,
+and that the retained frames follow it in order with strictly increasing
+ids. It must fail if the `max()` is replaced by `min()` or dropped.
+
+**Finding 2 — two docstrings state rules the code does not follow.**
+`gap_before`'s docstring says *"the server serves what it remembers and says
+what it does not have"*, which is not what happens when a client names a
+frame the session has not published yet: the session serves none of what it
+remembers, because the frames it remembers are not the ones the client asked
+for. The gap test's docstring says the client *"asked for the frames after a
+frame the session no longer remembers"* and *"is given what the session still
+has"* — the test asks for a frame the session never published and is given
+nothing.
+
+**Ruling 2.** The rule is the intersection, and the docstrings say so: the
+session serves the frames a resuming client asked for that the history still
+holds, and names what it cannot give. A frame the session has not published
+yet is served when the session reaches it, and until then the stream waits
+for it. The route's own docstring gets the same treatment: the frame-shape
+claim is scoped to the sequence frames, because the two control frames carry
+no `id:` and a `data:` of their own.
+
+**Finding 3 — two of blueprint §10's identity bullets are unproved.** The ids
+are never compared for order or repetition (the only value-level assertion is
+two ids), and nothing asserts the absence of an `id:` line on a control frame
+— the property the whole resume rests on, since a control frame with an id
+would advance every client's last-event-id buffer.
+
+**Ruling 3.** The gap and overflow tests assert that the control frame
+carries no `id:` field, and a test asserts that one stream's ids are
+strictly increasing with no repeats.
+
+**Finding 4 — three smaller gaps in the plan's own steps.**
+- The plan's tests use `WAIT_TIMEOUT`, which does not exist in
+  `backend/tests/test_stream_contract.py`; that file's bound is
+  `STREAM_READ_TIMEOUT`.
+- The plan's tests open a session through the process-wide registry and omit
+  the file's cleanup that takes the session out of it again.
+- The plan's Ruling 3 fixed `test_stream_contract.py`'s frame parser only.
+  `backend/tests/test_sse_fanout.py` parses frames positionally in four
+  places as well and breaks on the `id:` line.
+
+**Ruling 4.** The right constant and the cleanup are applied, and the
+overflow test in `test_sse_fanout.py` is adapted to read its frame's fields
+by name.
+
+**Finding 5 — the header parser accepts things that are not frame ids.**
+`int()` accepts `"5_0"` as 50 and `"١٢"` as 12, and `"-1"` is accepted and
+produces a spurious gap frame, while blueprint §4 says a frame id starts at
+1.
+
+**Ruling 5.** The header must be ASCII decimal digits and at least 1;
+anything else is refused with the 400 the route already returns. The error
+message stays *"Last-Event-ID is not a frame id."*
+
+**Ruling on the gap payload.** The payload keeps the shape blueprint §5 gives
+it — `{"requested_after", "oldest_retained"}` — and the docstring states the
+rule precisely instead. In the ahead-of-session case the two numbers do not
+describe a hole, because nothing is missed: the client will be served the
+frame it named when the session reaches it. No consumer reads those fields
+yet, and adding one to name the session's latest id would change the payload
+the blueprint fixes.
+
 ---
 
 ### Task 4: The desktop client
