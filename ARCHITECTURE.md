@@ -5234,3 +5234,16 @@ The gate now also names the API's token file among the directories it
 isolates, so a run that resolved a credential without naming the file
 cannot leave a token in the operator's home directory.
 
+The hosted CI agrees. On PR #4 the gate passed on both platforms:
+
+| Job | Run | Result |
+|---|---|---|
+| `Verify on ubuntu-latest` | 41393531249 | pass, 6m24s |
+| `Verify on windows-latest` | 41393531249 | pass, 7m16s |
+| `Verify on ubuntu-latest` | 41393561242 | pass, 5m47s |
+| `Verify on windows-latest` | 41393561242 | pass, 5m54s |
+
+Those runs are the first to exercise the credential end to end on Linux,
+where the desktop client is not part of the tier but the gateway, the
+release scripts and the live HTTP round trip are.
+
