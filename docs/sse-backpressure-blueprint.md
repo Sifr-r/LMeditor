@@ -227,7 +227,7 @@ rather than being discovered later.
 
 ## 9. The desktop client
 
-The client has to learn three things.
+The client has to learn four things.
 
 - **It has to read the `event:` field.** Today it reads only `data:` lines
   and decodes every one as a `WorkflowEvent`. The two control frames are
@@ -238,13 +238,19 @@ The client has to learn three things.
 - **It has to reconnect once when the stream ends with an overflow.** The
   overflow frame says the run is still going and this subscriber fell
   behind, so the client reopens the stream with its last id and carries on.
+- **It has to hand the two control frames to its caller.** They are the
+  server's word about the stream itself, and a caller that cannot see them
+  cannot tell a run that lost frames from one that did not. They arrive as
+  messages of their own — a `gap` and an `overflow` — beside the run's
+  events, carrying what they say. A control frame whose payload the client
+  cannot read is reported, not skipped.
 
 **What the client does not do.** It does not reconnect in a loop. A retry
 loop needs a backoff, a budget and some operator-visible state about how
 many attempts have been made, and that is a different design. One reconnect
 on an overflow is what this slice covers; a gap, by contrast, is not
-something to retry blindly — the client is told what it missed and
-re-fetches the document's state instead.
+something to retry blindly — the client is told what it missed, and
+re-fetching the document's state is out of scope for this slice.
 
 ## 10. What is tested
 
@@ -294,8 +300,8 @@ fix is verified to fail without it.
 ## 11. What this does not do
 
 - It does not make the stream lossless for a client that was away longer
-  than the session's memory. That client gets a gap, is told, and re-fetches
-  the authoritative state.
+  than the session's memory. That client gets a gap and is told; re-fetching
+  the authoritative state is out of scope for this slice.
 - It does not change the history's size, or what the history is for a late
   subscriber. It changes who reads it.
 - It does not change the terminal frames, the fan-out semantics, or the
@@ -314,5 +320,6 @@ fix is verified to fail without it.
 | `backend/tests/test_sse_fanout.py` | The overrun's effect on the other subscribers |
 | `kotlin/desktop/.../net/SseClient.kt` | The `event:` field, the last id, the reconnect |
 | `kotlin/desktop/.../net/SseClientTest.kt` | The client-side proofs |
+| `kotlin/desktop/.../model/StudioController.kt` | The notices: a gap and an overflow become the operator's notice |
 | `ARCHITECTURE.md` | The ledger, and §29.6's list |
 | `docs/production-readiness.md` | The closed item and what remains |

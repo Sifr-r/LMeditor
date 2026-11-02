@@ -25,6 +25,7 @@ import lmeditor.desktop.net.ApiCredential
 import lmeditor.desktop.net.BackendClient
 import lmeditor.desktop.net.BackendError
 import lmeditor.desktop.net.SseClient
+import lmeditor.desktop.net.SseMessage
 
 /**
  * How many hits the vault's search asks for.
@@ -1349,6 +1350,10 @@ class StudioController(
      * The stream is work in its own right: it is counted as one, so the
      * window stays busy and the button that starts a run stays out of reach
      * until the run ends rather than until the request that began it returns.
+     *
+     * The stream's own word about itself -- a gap or an overflow -- becomes a
+     * notice rather than being dropped, because a run that missed frames and
+     * a run that did not must not look the same to the operator.
      */
     private fun followStream(owner: Connection, docId: String, token: Int) {
         synchronized(connectionLock) {
@@ -1357,8 +1362,14 @@ class StudioController(
             owner.activeTasks++
             streamJob = scope.launch(owner.job) {
                 try {
-                    owner.events.events(docId).collect { event ->
-                        owner.updateState { RunReducer.reduce(it, event) }
+                    owner.events.events(docId).collect { message ->
+                        owner.updateState { state ->
+                            when (message) {
+                                is SseMessage.Event -> RunReducer.reduce(state, message.event)
+                                is SseMessage.Gap -> state.copy(notice = gapNotice(message))
+                                is SseMessage.Overflow -> state.copy(notice = overflowNotice(message))
+                            }
+                        }
                     }
                     owner.updateState {
                         if (it.docId == docId && it.status !in setOf("completed", "failed")) {
@@ -1381,6 +1392,45 @@ class StudioController(
             }
         }
     }
+
+    /**
+     * The notice for a resume the server could not serve completely.
+     *
+     * The server names the same two numbers in both of its cases: a client
+     * that was away longer than the server remembers, and a client that
+     * resumed ahead of the session and is waiting for a frame the session has
+     * not published yet. Only the first lost anything, so the notice says
+     * which one it is rather than claiming a loss that did not happen.
+     */
+    private fun gapNotice(gap: SseMessage.Gap): String {
+        // The bounds are computed as longs: a client may name a frame id
+        // beyond the range of an int, and the notice must not wrap around.
+        val firstMissed = gap.requestedAfter.toLong() + 1
+        val lastMissed = gap.oldestRetained.toLong() - 1
+        if (lastMissed < firstMissed) {
+            return "The event stream resumed after frame ${gap.requestedAfter}, " +
+                "which the server has not published yet. No events were missed."
+        }
+        val names = if (firstMissed == lastMissed) {
+            "frame $firstMissed"
+        } else {
+            "frames $firstMissed to $lastMissed"
+        }
+        return "The event stream missed $names; the server no longer has them."
+    }
+
+    /**
+     * The notice for a subscriber that fell behind.
+     *
+     * The server ended that stream, and the client may reopen it -- once. It
+     * says how many frames were withheld, because a run that missed frames
+     * and one that did not must not look the same. It does not claim the
+     * stream was reopened: the client reopens it on the first overflow only,
+     * and a second one ends the run instead.
+     */
+    private fun overflowNotice(overflow: SseMessage.Overflow): String =
+        "The event stream fell behind: the server held back ${overflow.behind} " +
+            "event(s) and ended that stream."
 
     /** Stop following the stream. */
     private fun stopStream() {

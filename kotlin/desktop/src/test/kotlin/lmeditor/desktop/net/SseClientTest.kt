@@ -14,6 +14,7 @@ import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import lmeditor.core.WorkflowEvent
 
 /** SSE framing and resource ownership, exercised entirely in memory. */
 class SseClientTest {
@@ -22,9 +23,9 @@ class SseClientTest {
         val input = ByteArrayInputStream((": heartbeat\n" +
             "data: {\"event_type\":\"node_start\",\n" +
             "data: \"step\":\"ingest\",\"doc_id\":\"doc_1\",\"data\":{}}\n\n").toByteArray())
-        val frames = client(input).events("doc_1").toList()
-        assertEquals(1, frames.size)
-        assertEquals("doc_1", frames.single().docId)
+        val messages = client(input).events("doc_1").toList()
+        assertEquals(1, messages.size)
+        assertEquals("doc_1", messages.events().single().docId)
     }
 
     @Test
@@ -89,11 +90,16 @@ class SseClientTest {
             CompletableFuture.completedFuture(StubResponse(it, 200, responses.removeFirst()))
         }
 
-        val events = SseClient(http, "http://example.test").events("doc_1").toList()
+        val messages = SseClient(http, "http://example.test").events("doc_1").toList()
 
-        assertEquals(listOf("node_start", "workflow_complete"), events.map { it.eventType.wire })
+        assertEquals(listOf("node_start", "workflow_complete"), messages.events().map { it.eventType.wire })
         assertEquals(2, requests)
         assertEquals("1", http.lastRequest?.headers()?.firstValue("Last-Event-ID")?.orElse(null))
+        // The caller is told what the server withheld: the control frame is
+        // read for what it says, not thrown away.
+        val overflow = messages.filterIsInstance<SseMessage.Overflow>().single()
+        assertEquals(3, overflow.behind)
+        assertEquals(2, overflow.oldestRetained)
     }
 
     @Test
@@ -121,10 +127,12 @@ class SseClientTest {
             )
         }
 
-        val events = SseClient(http, "http://example.test").events("doc_1").toList()
+        val messages = SseClient(http, "http://example.test").events("doc_1").toList()
 
-        assertEquals(listOf("node_start", "node_start"), events.map { it.eventType.wire })
+        assertEquals(listOf("node_start", "node_start"), messages.events().map { it.eventType.wire })
         assertEquals(2, requests)
+        // Both overflows reached the caller: neither was swallowed.
+        assertEquals(2, messages.filterIsInstance<SseMessage.Overflow>().size)
     }
 
     @Test
@@ -141,9 +149,11 @@ class SseClientTest {
             CompletableFuture.completedFuture(StubResponse(it, 200, input))
         }
 
-        val events = SseClient(http, "http://example.test").events("doc_1").toList()
+        val messages = SseClient(http, "http://example.test").events("doc_1").toList()
 
-        assertEquals(listOf("node_start"), events.map { it.eventType.wire })
+        assertEquals(listOf("node_start"), messages.events().map { it.eventType.wire })
+        // The comment block is not a message of its own.
+        assertEquals(1, messages.size)
     }
 
     @Test
@@ -162,12 +172,32 @@ class SseClientTest {
             CompletableFuture.completedFuture(StubResponse(it, 200, input))
         }
 
-        val events = SseClient(http, "http://example.test").events("doc_1").toList()
+        val messages = SseClient(http, "http://example.test").events("doc_1").toList()
 
-        assertEquals(listOf("node_start"), events.map { it.eventType.wire })
+        assertEquals(listOf("node_start"), messages.events().map { it.eventType.wire })
         assertEquals(1, requests)
         assertEquals(null, http.lastRequest?.headers()?.firstValue("Last-Event-ID")?.orElse(null))
+        // The caller is told which frames are gone: the control frame is read
+        // for what it says, not thrown away.
+        val gap = messages.filterIsInstance<SseMessage.Gap>().single()
+        assertEquals(1, gap.requestedAfter)
+        assertEquals(3, gap.oldestRetained)
     }
+
+    @Test
+    fun `a control frame the client cannot read is reported`() = runBlocking {
+        val notAnObject = "event: gap\ndata: [1, 2]\n\n"
+        val notAnInteger = "event: overflow\ndata: {\"behind\":\"three\",\"oldest_retained\":2}\n\n"
+        val missingField = "event: gap\ndata: {\"requested_after\":1}\n\n"
+        for (payload in listOf(notAnObject, notAnInteger, missingField)) {
+            val input = ByteArrayInputStream(payload.toByteArray())
+            assertFailsWith<BackendError.Malformed> { client(input).events("doc_1").toList() }
+        }
+    }
+
+    /** The workflow events among the messages the stream carried. */
+    private fun List<SseMessage>.events(): List<WorkflowEvent> =
+        filterIsInstance<SseMessage.Event>().map { it.event }
 
     private fun client(input: InputStream, status: Int = 200): SseClient = SseClient(
         StubHttpClient { CompletableFuture.completedFuture(StubResponse(it, status, input)) },

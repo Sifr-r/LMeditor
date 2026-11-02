@@ -22,6 +22,7 @@ import javax.net.ssl.SSLSession
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -258,6 +259,61 @@ class StudioControllerTest {
             val completed = withTimeout(5_000) { controller.state.first { it.status == "completed" } }
             assertEquals(null, completed.error)
         } finally { scope.cancel() }
+    }
+
+    @Test
+    fun `the stream's control frames reach the operator as notices`() = runBlocking {
+        // A gap that names frames that are gone says which ones.
+        val gap = noticeFromStream(
+            "event: gap\ndata: {\"requested_after\":1,\"oldest_retained\":3}\n\n",
+            "missed",
+        )
+        assertTrue(gap.contains("missed frame 2"), gap)
+
+        // A gap that names a frame the session has not published yet claims
+        // no loss: nothing was missed there.
+        val ahead = noticeFromStream(
+            "event: gap\ndata: {\"requested_after\":999,\"oldest_retained\":1}\n\n",
+            "has not published yet",
+        )
+        assertTrue(ahead.contains("No events were missed"), ahead)
+
+        // An overflow says how many frames the server withheld.
+        val overflow = noticeFromStream(
+            "event: overflow\ndata: {\"reason\":\"the subscriber fell behind\"," +
+                "\"behind\":3,\"oldest_retained\":2}\n\n",
+            "fell behind",
+        )
+        assertTrue(overflow.contains("held back 3"), overflow)
+        // It does not claim the stream was reopened: the client reopens it on
+        // the first overflow only, and a second one ends the run instead.
+        assertTrue(overflow.contains("ended that stream"), overflow)
+        assertFalse(overflow.contains("reopened"), overflow)
+    }
+
+    /**
+     * The notice one stream's body leaves in the state.
+     *
+     * A fresh controller and a fresh client for every stream: the notice is
+     * the last thing the window was told, so one run's notice would hide
+     * another's.
+     */
+    private suspend fun noticeFromStream(body: String, expected: String): String {
+        val http = ControlledHttpClient()
+        val scope = CoroutineScope(Job() + Dispatchers.Unconfined)
+        try {
+            val controller = StudioController(scope, http)
+            controller.setTopic("A topic")
+            controller.startRun()
+            http.next().reply("""{"doc_id":"doc_1","status":"running"}""")
+            http.next().reply(body, stream = true)
+            val noticed = withTimeout(5_000) {
+                controller.state.first { it.notice?.contains(expected) == true }
+            }
+            return noticed.notice.orEmpty()
+        } finally {
+            scope.cancel()
+        }
     }
 
     @Test

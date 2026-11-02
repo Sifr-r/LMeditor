@@ -23,6 +23,46 @@ import lmeditor.core.json.Json
 import lmeditor.core.workflowEventFromWire
 
 /**
+ * One thing the stream carried.
+ *
+ * The stream carries two kinds of thing: the run's events, and the server's
+ * word about the stream itself. They are told apart here so that a caller is
+ * never left to guess which it holds. The control frames exist to tell the
+ * caller that frames were missed, and a caller that cannot see them cannot
+ * tell a complete run from a short one.
+ */
+sealed interface SseMessage {
+    /** A workflow event, exactly as the backend published it. */
+    data class Event(val event: WorkflowEvent) : SseMessage
+
+    /**
+     * The frames a resume asked for are not all available.
+     *
+     * `requestedAfter` is the frame the client named and `oldestRetained` the
+     * oldest frame the server still holds. When the frames between them have
+     * left the server's memory they are gone, and the client will never be
+     * given them. The same two numbers also describe a client that resumed
+     * *ahead* of the session, and there they mean the opposite thing:
+     * nothing is missing and the stream is waiting for a frame the session
+     * has not published yet. The caller tells the two apart by comparing
+     * them: frames are gone when `oldestRetained` is more than one beyond
+     * `requestedAfter`.
+     */
+    data class Gap(val requestedAfter: Int, val oldestRetained: Int) : SseMessage
+
+    /**
+     * The subscriber fell behind and the server ended the stream.
+     *
+     * `behind` is the number of frames the server published that this
+     * subscriber was never given, and `oldestRetained` is the oldest frame
+     * the server still holds. The client reopens the stream with the id of
+     * the last frame it received, so the frames it missed are replayed
+     * rather than lost.
+     */
+    data class Overflow(val behind: Int, val oldestRetained: Int) : SseMessage
+}
+
+/**
  * One frame of the stream, as the server wrote it.
  *
  * The server writes three kinds of frame: a sequence frame, which carries an
@@ -55,7 +95,7 @@ class SseClient(
     private val baseUrl = backendUrl(baseUrl)
 
     /**
-     * The frames of one run, in the order the server published them.
+     * The messages of one run, in the order the server published them.
      *
      * The flow throws [BackendError] when the stream cannot be read at all.
      * A frame the client cannot decode is a genuine disagreement between the
@@ -68,8 +108,13 @@ class SseClient(
      * frame it received and carries on. It does that once -- a retry loop needs
      * a backoff and a budget, which is a different decision -- so a second
      * overflow ends the stream, and the caller sees a run that stopped short.
+     *
+     * The two control frames are handed to the caller as messages of their
+     * own, carrying what they say. They are the server's word about the
+     * stream, and a caller that could not see them could not tell a run that
+     * lost frames from one that did not.
      */
-    fun events(docId: String): Flow<WorkflowEvent> = channelFlow {
+    fun events(docId: String): Flow<SseMessage> = channelFlow {
         var lastEventId: String? = null
         var reconnected = false
         // The body of the response being read now. A blocked read is not
@@ -108,7 +153,11 @@ class SseClient(
                                         // The run is still going and this subscriber fell
                                         // behind. The stream is reopened with the last
                                         // frame received, so the frames it missed are
-                                        // replayed rather than lost.
+                                        // replayed rather than lost. The caller is told
+                                        // how many frames it was never given: a run that
+                                        // lost frames and one that did not must not look
+                                        // the same to it.
+                                        send(decodeOverflow(frame.data))
                                         overflowed = true
                                         break
                                     }
@@ -117,11 +166,14 @@ class SseClient(
                                         // asked for, and named the hole. The hole cannot be
                                         // filled from the stream: the document's state is
                                         // the authoritative record, and the stream carries
-                                        // on with what comes next.
+                                        // on with what comes next. The caller is told which
+                                        // frames are gone, so that it can say the run is
+                                        // short rather than show a stream that looks whole.
+                                        send(decodeGap(frame.data))
                                     }
                                     else -> {
                                         frame.id?.let { lastEventId = it }
-                                        send(decode(frame.data))
+                                        send(SseMessage.Event(decode(frame.data)))
                                     }
                                 }
                             }
@@ -206,5 +258,58 @@ class SseClient(
         } catch (cause: ValidationError) {
             throw BackendError.Malformed("event", cause)
         }
+    }
+
+    /** Decode an overflow frame's payload into the frames it was never given. */
+    private fun decodeOverflow(payload: String): SseMessage.Overflow {
+        val map = controlPayload(payload, "overflow")
+        return SseMessage.Overflow(
+            behind = requiredCount(map, "behind", "overflow"),
+            oldestRetained = requiredCount(map, "oldest_retained", "overflow"),
+        )
+    }
+
+    /** Decode a gap frame's payload into the ids that describe the hole. */
+    private fun decodeGap(payload: String): SseMessage.Gap {
+        val map = controlPayload(payload, "gap")
+        return SseMessage.Gap(
+            requestedAfter = requiredCount(map, "requested_after", "gap"),
+            oldestRetained = requiredCount(map, "oldest_retained", "gap"),
+        )
+    }
+
+    /**
+     * The payload of a control frame, read as an object.
+     *
+     * A control frame the client cannot read is a genuine disagreement
+     * between the two halves of the system, and it is reported rather than
+     * skipped: a silently dropped control frame is a run that looks complete
+     * and is not.
+     */
+    private fun controlPayload(payload: String, what: String): Map<String, Any?> {
+        try {
+            return Json.parseObject(payload)
+        } catch (cause: ValidationError) {
+            throw BackendError.Malformed("$what frame", cause)
+        }
+    }
+
+    /**
+     * One count from a control frame's payload.
+     *
+     * The count must be a whole number the client can hold: a field that is
+     * missing, or that holds something else, means the client and the server
+     * disagree about what the frame says, and that is reported rather than
+     * guessed at.
+     */
+    private fun requiredCount(map: Map<String, Any?>, name: String, what: String): Int {
+        val value = map[name]
+        if (value !is Long || value < Int.MIN_VALUE || value > Int.MAX_VALUE) {
+            throw BackendError.Malformed(
+                "$what frame",
+                ValidationError("the '$name' field is not a whole number", field = name),
+            )
+        }
+        return value.toInt()
     }
 }
