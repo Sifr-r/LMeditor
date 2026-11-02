@@ -178,6 +178,14 @@ class WorkflowSession:
         #: Frames refused because they followed the terminal frame. Counted
         #: rather than dropped silently.
         self.post_terminal_events_dropped: int = 0
+        #: Subscribers disconnected for falling behind. Counted, because a
+        #: subscriber that vanished for being slow is exactly what an
+        #: operator needs to see.
+        self.overflowed_subscribers: int = 0
+        #: Frames a subscriber was never given because it fell behind. The
+        #: frames were published to the session's history; they were
+        #: withheld from that one subscriber.
+        self.frames_withheld: int = 0
 
     # ------------------------------------------------------------------
     # Subscriber fan-out
@@ -291,11 +299,14 @@ class WorkflowSession:
             # the session has not published it yet, or the history has
             # rotated past it and the subscriber has missed frames.
             if self._oldest_retained_id() > subscription.position + 1:
-                raise SubscriberOverrun(
+                overrun = SubscriberOverrun(
                     subscription.subscription_id,
                     subscription.position,
                     self._oldest_retained_id(),
                 )
+                self.overflowed_subscribers += 1
+                self.frames_withheld += overrun.frames_missed
+                raise overrun
             if self._terminated:
                 return None
             await subscription.wait()

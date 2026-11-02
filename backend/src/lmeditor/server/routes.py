@@ -62,6 +62,7 @@ from lmeditor.server.routes_helpers import (
 )
 from lmeditor.server.session import (
     ActiveSessionExistsError,
+    SubscriberOverrun,
     WorkflowSession,
     scorecard_payload,
     session_manager,
@@ -1055,6 +1056,11 @@ async def stream_workflow_events(doc_id: str) -> StreamingResponse:
     ``workflow_complete`` and ``workflow_error``; the stream ends once the
     subscriber has read the terminal frame.
 
+    A subscriber that falls behind the session's history cannot be given the
+    frames it has not read, because they have left it. Its stream ends with
+    an ``overflow`` control frame instead, whose ``data:`` names what was
+    missed, so the client knows the run is still going and reconnects.
+
     Every request gets its own subscription, so concurrent streams on one
     document each receive the full frame sequence instead of dividing it, and a
     stream attached to a finished session is closed immediately from the
@@ -1071,7 +1077,22 @@ async def stream_workflow_events(doc_id: str) -> StreamingResponse:
         subscription = await session.subscribe()
         try:
             while True:
-                frame = await session.next_frame(subscription)
+                try:
+                    frame = await session.next_frame(subscription)
+                except SubscriberOverrun as overrun:
+                    # The subscriber fell behind: the frames it has not read
+                    # have left the session's history, so it can never be
+                    # given them. It is ended with the reason, and it
+                    # reconnects with the id of the last frame it received.
+                    payload = json.dumps(
+                        {
+                            "reason": "the subscriber fell behind",
+                            "behind": overrun.frames_missed,
+                            "oldest_retained": overrun.oldest_retained,
+                        }
+                    )
+                    yield f"event: overflow\ndata: {payload}\n\n"
+                    break
                 if frame is None:
                     # The session is finished and this subscriber has read
                     # the terminal frame.

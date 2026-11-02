@@ -410,6 +410,48 @@ def test_a_subscriber_holds_no_frames_of_its_own() -> None:
     assert session.subscriber_count == 1
 
 
+def test_a_subscriber_that_fell_behind_is_told_and_disconnected() -> None:
+    """A subscriber that stops reading is disconnected, and told why.
+
+    The frames it has not read have left the session's history, so it can
+    never be given them. It is ended with an overflow frame saying so, and
+    the other subscribers are untouched.
+    """
+    doc_id = "doc_fanout_overrun"
+
+    async def run() -> tuple[list[str], WorkflowSession]:
+        session = await session_manager.create_session(doc_id=doc_id, topic="fanout")
+        response = await routes.stream_workflow_events(doc_id)
+        body = cast(AsyncGenerator[str, None], response.body_iterator)
+
+        # The subscriber reads one frame and then stops reading entirely.
+        await session.publish_event(_event(doc_id, EventType.NODE_START, WorkflowStep.INGEST))
+        first = await asyncio.wait_for(body.__anext__(), timeout=WAIT_TIMEOUT)
+
+        # More frames than the history holds, so the one the subscriber did
+        # not read has left it.
+        for _ in range(STREAM_REPLAY_BUFFER + 2):
+            await session.publish_event(
+                _event(doc_id, EventType.NODE_COMPLETE, WorkflowStep.DRAFT_SECTIONS)
+            )
+
+        rest = []
+        while True:
+            try:
+                rest.append(
+                    await asyncio.wait_for(body.__anext__(), timeout=WAIT_TIMEOUT)
+                )
+            except StopAsyncIteration:
+                break
+        await body.aclose()
+        return [first, *rest], session
+
+    frames, session = asyncio.run(run())
+
+    assert any("event: overflow" in frame for frame in frames)
+    assert session.overflowed_subscribers == 1
+
+
 def test_a_dropped_stream_unsubscribes_and_stops_accumulating() -> None:
     """Cleanup on disconnect, not only on stream completion.
 
