@@ -1,6 +1,7 @@
 package lmeditor.desktop.net
 
 import java.io.BufferedReader
+import java.io.InputStream
 import java.io.InputStreamReader
 import java.io.IOException
 import java.net.URI
@@ -8,6 +9,7 @@ import java.net.http.HttpClient
 import java.net.http.HttpRequest
 import java.net.http.HttpResponse
 import java.nio.charset.StandardCharsets
+import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.channels.awaitClose
@@ -20,11 +22,23 @@ import lmeditor.core.json.Json
 import lmeditor.core.workflowEventFromWire
 
 /**
+ * One frame of the stream, as the server wrote it.
+ *
+ * The server writes three kinds of frame: a sequence frame, which carries an
+ * `id:` and a `data:` envelope of a workflow event; and two control frames,
+ * `overflow` and `gap`, which carry neither an id nor an event envelope.
+ * They are told apart by the `event:` name, which is why it is read.
+ */
+private data class SseFrame(val event: String?, val id: String?, val data: String)
+
+/**
  * The reader for the backend's Server-Sent Event stream.
  *
- * The stream is the run's voice: every frame is a `WorkflowEvent`, decoded by
- * the tier's own decoder, so the client and the server read the same frame
- * with the same rules.
+ * The stream is the run's voice: every sequence frame is a `WorkflowEvent`,
+ * decoded by the tier's own decoder, so the client and the server read the
+ * same frame with the same rules. The two control frames -- `overflow` and
+ * `gap` -- report on the stream rather than carrying an event, and are told
+ * apart by their `event:` name; they are never decoded as events.
  *
  * The stream ends when the server closes it, which it does after the
  * terminal frame. That is not a failure: a finished run is a finished stream.
@@ -46,49 +60,107 @@ class SseClient(
      * A frame the client cannot decode is a genuine disagreement between the
      * two halves of the system, and it is reported rather than skipped: a
      * silently dropped frame is a run that looks complete and is not.
+     *
+     * The server disconnects a subscriber that has fallen behind, and says so
+     * in an `overflow` frame before it closes. That is not a failure: the run
+     * is still going, so the client reopens the stream with the id of the last
+     * frame it received and carries on. It does that once -- a retry loop needs
+     * a backoff and a budget, which is a different decision.
      */
     fun events(docId: String): Flow<WorkflowEvent> = channelFlow {
-        val request = HttpRequest.newBuilder()
-            .uri(URI.create("$baseUrl/api/v1/stream/${pathSegment(docId)}"))
-            .header("Authorization", credential.authorization())
-            .header("Accept", "text/event-stream")
-            .header("Cache-Control", "no-cache")
-            .GET()
-            .build()
-        val response = http.sendCancellable(request, HttpResponse.BodyHandlers.ofInputStream())
-        val body = response.body()
+        var lastEventId: String? = null
+        // The body of the response being read now. A blocked read is not
+        // interrupted by cancellation, so cancellation reaches it by closing
+        // the body; the holder is how the closing thread finds it.
+        val open = AtomicReference<InputStream?>(null)
         val worker = launch(Dispatchers.IO) {
             try {
-                body.use {
-                    if (response.statusCode() != 200) {
-                        throw BackendError.Refused(response.statusCode(), "the event stream was refused")
-                    }
-                    val reader = BufferedReader(InputStreamReader(it, StandardCharsets.UTF_8))
-                    val data = mutableListOf<String>()
-                    while (true) {
-                        val line = reader.readLine() ?: break
-                        when {
-                            line.startsWith("data:") -> data.add(line.substring(5).removePrefix(" "))
-                            line.isEmpty() && data.isNotEmpty() -> {
-                                send(decode(data.joinToString("\n")))
-                                data.clear()
+                while (true) {
+                    val request = buildRequest(docId, lastEventId)
+                    var overflowed = false
+                    try {
+                        val response = http.sendCancellable(request, HttpResponse.BodyHandlers.ofInputStream())
+                        val body = response.body()
+                        open.set(body)
+                        body.use { stream ->
+                            if (response.statusCode() != 200) {
+                                throw BackendError.Refused(response.statusCode(), "the event stream was refused")
+                            }
+                            val reader = BufferedReader(InputStreamReader(stream, StandardCharsets.UTF_8))
+                            while (true) {
+                                val frame = readFrame(reader) ?: break
+                                when (frame.event) {
+                                    "overflow" -> {
+                                        // The run is still going and this subscriber fell
+                                        // behind. The stream is reopened with the last
+                                        // frame received, so the frames it missed are
+                                        // replayed rather than lost.
+                                        overflowed = true
+                                        break
+                                    }
+                                    "gap" -> {
+                                        // The server could not give this client the frames it
+                                        // asked for, and named the hole. The authoritative
+                                        // state is fetched separately; the stream continues.
+                                    }
+                                    else -> {
+                                        frame.id?.let { lastEventId = it }
+                                        send(decode(frame.data))
+                                    }
+                                }
                             }
                         }
+                    } catch (cause: CancellationException) {
+                        throw cause
+                    } catch (cause: IOException) {
+                        throw BackendError.Unreachable(request.uri().toString(), cause)
+                    } finally {
+                        open.set(null)
+                    }
+                    if (!overflowed) {
+                        break
                     }
                 }
                 close()
             } catch (cause: CancellationException) {
                 throw cause
-            } catch (cause: IOException) {
-                close(BackendError.Unreachable(request.uri().toString(), cause))
             } catch (cause: BackendError) {
                 close(cause)
             }
         }
         awaitClose {
             worker.cancel()
-            body.close()
+            open.get()?.close()
         }
+    }
+
+    /** Read one frame's lines into a frame, or null at the end of the stream. */
+    private fun readFrame(reader: BufferedReader): SseFrame? {
+        var event: String? = null
+        var id: String? = null
+        val data = mutableListOf<String>()
+        while (true) {
+            val line = reader.readLine() ?: return null
+            when {
+                line.startsWith("event:") -> event = line.substring(6).trim()
+                line.startsWith("id:") -> id = line.substring(3).trim()
+                line.startsWith("data:") -> data.add(line.substring(5).removePrefix(" "))
+                line.isEmpty() -> return SseFrame(event, id, data.joinToString("\n"))
+            }
+        }
+    }
+
+    /** The request for one stream, resuming after the last frame received. */
+    private fun buildRequest(docId: String, lastEventId: String?): HttpRequest {
+        val builder = HttpRequest.newBuilder()
+            .uri(URI.create("$baseUrl/api/v1/stream/${pathSegment(docId)}"))
+            .header("Authorization", credential.authorization())
+            .header("Accept", "text/event-stream")
+            .header("Cache-Control", "no-cache")
+        if (lastEventId != null) {
+            builder.header("Last-Event-ID", lastEventId)
+        }
+        return builder.GET().build()
     }
 
     /** Decode one frame's payload into the event it carries. */
