@@ -1264,6 +1264,25 @@ Add to `kotlin/desktop/src/test/kotlin/lmeditor/desktop/net/SseClientTest.kt`:
         assertEquals(listOf("node_start", "node_start"), events.map { it.eventType.wire })
         assertEquals(2, requests)
     }
+
+    @Test
+    fun `a comment block with no data is read past`() = runBlocking {
+        val input = ByteArrayInputStream(
+            (": heartbeat\n" +
+                "\n" +
+                "id: 7\n" +
+                "event: node_start\n" +
+                "data: {\"event_type\":\"node_start\",\"step\":\"ingest\",\"doc_id\":\"doc_1\",\"data\":{}}\n\n")
+                .toByteArray()
+        )
+        val http = StubHttpClient {
+            CompletableFuture.completedFuture(StubResponse(it, 200, input))
+        }
+
+        val events = SseClient(http, "http://example.test").events("doc_1").toList()
+
+        assertEquals(listOf("node_start"), events.map { it.eventType.wire })
+    }
 ```
 
 `StubHttpClient` and `StubResponse` live in `BackendClientTest.kt` and are
@@ -1377,8 +1396,12 @@ Replace `SseClient.events` with:
                         // completing and the body being published would
                         // otherwise leave the body open with nobody to close
                         // it, and the blocked read below would never end.
+                        // The worker stops here rather than reading a closed
+                        // stream and reporting the result as an unreachable
+                        // backend, which is not what happened.
                         if (!isActive) {
                             body.close()
+                            return@launch
                         }
                         body.use { stream ->
                             if (response.statusCode() != 200) {
@@ -1633,6 +1656,52 @@ than as an assertion failure.
 said a frame with no `id:` is a control frame; the name is the discriminator.
 
 **Ruling 6.** Correction 10 is corrected above.
+
+### Correction 14 — Task 4: the two coverage gaps the fix round left
+
+Added after the scoped re-review of Task 4's fix round, which returned every
+finding ADDRESSED and no new Critical or Important breakage, and named two
+coverage gaps.
+
+**Finding 1 — the read-past of a comment block is not pinned.** The fix for
+a blank line with no data is applied, but no test exercises it, so a
+regression would not be caught. It is deterministically pinnable: a stream
+whose first block is a comment with no data (`": heartbeat\n\n"`) followed by
+a valid sequence frame. Without the fix, `readFrame` returns an empty frame,
+`decode("")` raises, and the flow fails with `BackendError.Malformed`; with
+the fix the block is read past and the frame is delivered.
+
+**Ruling 1.** A test is added.
+
+**Finding 2 — the cancellation window is not pinned, and cannot be.** The
+window lies between two adjacent statements with no suspension point
+between them, so a cancellation there can only be *requested* concurrently,
+never *observed*. To land one deterministically a test would have to block
+the seam at `response.body()`, and the without-fix run only fails when
+`awaitClose` ran before the body was published — otherwise `awaitClose`
+itself closes the body and the without-fix run passes. Establishing that
+ordering would mean reaching into the coroutine's job tree or sleeping, and
+the without-fix failure mode is a *hang*, not an assertion.
+
+**Ruling 2.** The fix stands on inspection and on the interleaving analysis:
+a cancellation before the body is published is caught by the worker's own
+liveness check, one after it is caught by `awaitClose`, and one between the
+two is caught by the worker's check as well. Every ordering closes the body.
+No test is written, because a test that only fails when the race is hit is a
+flaky test, and this repository's rule is that a test which pins a fix is
+verified to fail without it. This is recorded as an unpinned defensive fix
+for the final review to triage.
+
+**Finding 3 — the cancellation path reported itself as an unreachable
+backend.** After the worker closes the body itself, the read of a closed
+stream raises `IOException`, which the client maps to
+`BackendError.Unreachable` — a misleading label for a cancellation. It is
+benign today, because a cancelled worker implies a closed channel and the
+error is dropped, but it would become visible if the worker were ever made
+cancellable independently of the channel.
+
+**Ruling 3.** The worker stops when it finds itself cancelled, rather than
+reading a closed stream and reporting the result as an unreachable backend.
 
 ---
 
