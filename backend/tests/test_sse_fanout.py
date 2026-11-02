@@ -14,8 +14,8 @@ Everything here is offline. No stream is proven over live HTTP: httpx's
 concurrently open SSE responses, and a real network fetch is out of scope. The
 delivery defect lives in the session's fan-out, so that is where the fan-out is
 proven, and the routes are proven through the functions FastAPI calls. Every
-wait that could hang on a lost sentinel is bounded, so a regression fails a test
-instead of stalling the suite.
+wait that could hang on a stream that never ends is bounded, so a regression
+fails a test instead of stalling the suite.
 """
 
 from __future__ import annotations
@@ -47,7 +47,8 @@ from lmeditor.server.session import (
 )
 from tests.http_support import async_client
 
-#: Upper bound for every wait that a lost sentinel could turn into a hang.
+#: Upper bound for every wait that a stream that never ends could turn into
+#: a hang.
 WAIT_TIMEOUT: float = 5.0
 
 #: Bound on a deliberately blocking seam, so a test that *should* have stayed
@@ -75,28 +76,60 @@ def _event(doc_id: str, event_type: EventType, step: WorkflowStep, **data: Any) 
     return WorkflowEvent(event_type=event_type, step=step, doc_id=doc_id, data=data)
 
 
+def _fields(frame: str) -> dict[str, str]:
+    """The fields of an SSE frame, read by name rather than by position.
+
+    A frame's fields are read by name so that a frame can carry another
+    field -- the frame id -- without every reader of a frame having to
+    know where it sits.
+    """
+    fields: dict[str, str] = {}
+    for line in frame.split("\n"):
+        key, _, value = line.partition(":")
+        fields[key] = value.strip()
+    return fields
+
+
+def _field(frame: str, name: str) -> str:
+    """One field of an SSE frame, read by name.
+
+    A frame that does not carry the field is a failure of the frame, and
+    the reader says so rather than working around it.
+    """
+    fields = _fields(frame)
+    if name not in fields:
+        raise AssertionError(f"the frame carries no {name!r} field: {frame!r}")
+    return fields[name]
+
+
 def _types(frames: list[WorkflowEvent]) -> list[EventType]:
     return [frame.event_type for frame in frames]
 
 
-async def _collect(subscription: EventSubscription) -> list[WorkflowEvent]:
-    """Read frames until the terminal sentinel. Bound by the caller."""
+async def _collect(
+    session: WorkflowSession, subscription: EventSubscription
+) -> list[WorkflowEvent]:
+    """Read frames until the stream ends. Bound by the caller."""
     frames: list[WorkflowEvent] = []
     while True:
-        frame = await subscription.get()
+        frame = await session.next_frame(subscription)
         if frame is None:
             return frames
-        frames.append(frame)
+        frames.append(frame[1])
 
 
-async def _collect_bounded(subscription: EventSubscription) -> list[WorkflowEvent]:
-    """``_collect`` under a timeout: a missing sentinel fails the test.
+async def _collect_bounded(
+    session: WorkflowSession, subscription: EventSubscription
+) -> list[WorkflowEvent]:
+    """``_collect`` under a timeout: a stream that never ends fails the test.
 
     Under the old shared-queue design only one of several subscribers ever
     received the sentinel, so this is where such a regression surfaces as a
     ``TimeoutError`` instead of a hung suite.
     """
-    return await asyncio.wait_for(_collect(subscription), timeout=WAIT_TIMEOUT)
+    return await asyncio.wait_for(
+        _collect(session, subscription), timeout=WAIT_TIMEOUT
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -133,7 +166,7 @@ def test_two_concurrent_subscribers_each_receive_the_complete_sequence() -> None
         )
         await session.complete(sections=[{"section_id": "sec_1", "title": "Intro"}])
 
-        return await _collect_bounded(first), await _collect_bounded(second)
+        return await _collect_bounded(session, first), await _collect_bounded(session, second)
 
     first_frames, second_frames = asyncio.run(run())
 
@@ -146,7 +179,7 @@ def test_two_concurrent_subscribers_each_receive_the_complete_sequence() -> None
 
 
 def test_a_subscriber_that_joins_a_closed_session_is_terminated_at_once() -> None:
-    """A stream opened after completion must not wait on a dead queue.
+    """A stream opened after completion must not wait for a frame nobody publishes.
 
     Bounded by :data:`WAIT_TIMEOUT`: the old design consumed the single
     sentinel for the first stream, so this subscribe blocked on an empty queue
@@ -164,7 +197,7 @@ def test_a_subscriber_that_joins_a_closed_session_is_terminated_at_once() -> Non
         # Nothing more can ever be published, so it is not registered for
         # fan-out; it is closed by the replay buffer instead.
         assert session.subscriber_count == 0
-        return await _collect_bounded(late)
+        return await _collect_bounded(session, late)
 
     frames = asyncio.run(run())
 
@@ -173,7 +206,7 @@ def test_a_subscriber_that_joins_a_closed_session_is_terminated_at_once() -> Non
 
 
 def test_a_mid_run_subscriber_receives_replayed_history_then_live_frames() -> None:
-    """Bounded replay: a late subscriber sees recent history, not an empty queue.
+    """Bounded replay: a late subscriber sees recent history, not an empty stream.
 
     History is delivered exactly once — as replay — and live frames continue on
     the same subscription without repeating or reordering the replayed ones.
@@ -186,12 +219,12 @@ def test_a_mid_run_subscriber_receives_replayed_history_then_live_frames() -> No
         await session.publish_event(_event(doc_id, EventType.NODE_COMPLETE, WorkflowStep.INGEST))
 
         late = await session.subscribe()
-        replayed = late.drain()
+        replayed = session.drain(late)
         assert _types(replayed) == [EventType.NODE_START, EventType.NODE_COMPLETE]
 
         await session.publish_event(_event(doc_id, EventType.NODE_START, WorkflowStep.DRAFT_SECTIONS))
         await session.complete(sections=[{"section_id": "sec_1", "title": "Intro"}])
-        return replayed + await _collect_bounded(late)
+        return replayed + await _collect_bounded(session, late)
 
     frames = asyncio.run(run())
 
@@ -223,7 +256,7 @@ def test_the_replay_buffer_is_bounded_to_the_documented_size() -> None:
         assert STREAM_REPLAY_BUFFER == 512
 
         late = await session.subscribe()
-        return late.drain()
+        return session.drain(late)
 
     frames = asyncio.run(run())
 
@@ -340,8 +373,13 @@ def test_failure_and_rejection_deliver_one_terminal_frame_and_no_completion() ->
         rejected_subscribers = [await rejected.subscribe(), await rejected.subscribe()]
         await rejected.terminate_rejected("the argument is unsupported")
 
-        for subscription in (*failed_subscribers, *rejected_subscribers):
-            assert _types(await _collect_bounded(subscription)) == [EventType.WORKFLOW_ERROR]
+        for session, subscription in (
+            (failed, failed_subscribers[0]),
+            (failed, failed_subscribers[1]),
+            (rejected, rejected_subscribers[0]),
+            (rejected, rejected_subscribers[1]),
+        ):
+            assert _types(await _collect_bounded(session, subscription)) == [EventType.WORKFLOW_ERROR]
         return failed, rejected
 
     failed, rejected = asyncio.run(run())
@@ -355,7 +393,7 @@ def test_failure_and_rejection_deliver_one_terminal_frame_and_no_completion() ->
 
 
 def test_a_terminal_transition_is_idempotent_for_every_subscriber() -> None:
-    """A second terminal transition adds no frame and no second sentinel."""
+    """A second terminal transition adds no frame and no second close."""
     doc_id = "doc_fanout_idempotent"
 
     async def run() -> list[WorkflowEvent]:
@@ -364,7 +402,7 @@ def test_a_terminal_transition_is_idempotent_for_every_subscriber() -> None:
         await session.complete(sections=[{"section_id": "sec_1", "title": "Intro"}])
         await session.complete(sections=[{"section_id": "sec_2", "title": "Other"}])
         await session.fail("must not overwrite a completed run")
-        return await _collect_bounded(subscriber)
+        return await _collect_bounded(session, subscriber)
 
     frames = asyncio.run(run())
 
@@ -373,8 +411,153 @@ def test_a_terminal_transition_is_idempotent_for_every_subscriber() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Finding 13: a dropped client must not keep a queue alive
+# Finding 13: a subscriber is a position, not a queue
 # ---------------------------------------------------------------------------
+
+
+def test_a_subscriber_holds_no_frames_of_its_own() -> None:
+    """A subscriber's memory is a position, not a copy of the frames.
+
+    The session's history is the only copy. A subscriber that has not read
+    anything holds nothing, so a hundred stalled subscribers cost what one
+    stalled subscriber costs.
+    """
+    doc_id = "doc_fanout_cursor"
+
+    async def run() -> WorkflowSession:
+        session = await session_manager.create_session(doc_id=doc_id, topic="fanout")
+        await session.publish_event(_event(doc_id, EventType.NODE_START, WorkflowStep.INGEST))
+        subscription = await session.subscribe()
+        assert not hasattr(subscription, "_frames")
+        assert subscription.position == 0
+        return session
+
+    session = asyncio.run(run())
+
+    assert session.subscriber_count == 1
+
+
+def test_a_subscriber_that_fell_behind_is_told_and_disconnected() -> None:
+    """A subscriber that stops reading is disconnected, and told why.
+
+    The frames it has not read have left the session's history, so it can
+    never be given them. It is ended with an overflow frame saying so, the
+    subscriber that kept reading is given every frame, and the overflowed
+    subscription is released.
+    """
+    doc_id = "doc_fanout_overrun"
+
+    async def run() -> tuple[list[str], list[int], int, WorkflowSession]:
+        session = await session_manager.create_session(doc_id=doc_id, topic="fanout")
+
+        # A second subscriber keeps reading every frame the session publishes.
+        keeper = await session.subscribe()
+        received: list[int] = []
+
+        async def keep_up() -> None:
+            while True:
+                frame = await session.next_frame(keeper)
+                if frame is None:
+                    return
+                received.append(frame[0])
+
+        reading = asyncio.create_task(keep_up())
+        before_attach = session.subscriber_count
+
+        response = await routes.stream_workflow_events(doc_id)
+        body = cast(AsyncGenerator[str, None], response.body_iterator)
+
+        # The subscriber reads one frame and then stops reading entirely.
+        await session.publish_event(_event(doc_id, EventType.NODE_START, WorkflowStep.INGEST))
+        first = await asyncio.wait_for(body.__anext__(), timeout=WAIT_TIMEOUT)
+
+        # More frames than the history holds, so the one the subscriber did
+        # not read has left it.
+        for _ in range(STREAM_REPLAY_BUFFER + 2):
+            await session.publish_event(
+                _event(doc_id, EventType.NODE_COMPLETE, WorkflowStep.DRAFT_SECTIONS)
+            )
+            # The subscriber that keeps up is given the chance to read each
+            # frame, so that it stays level with the publisher.
+            await asyncio.sleep(0)
+
+        rest = []
+        while True:
+            try:
+                rest.append(
+                    await asyncio.wait_for(body.__anext__(), timeout=WAIT_TIMEOUT)
+                )
+            except StopAsyncIteration:
+                break
+        await body.aclose()
+
+        # The session ends, so the subscriber that kept up finishes with it.
+        await session.complete()
+        await asyncio.wait_for(reading, timeout=WAIT_TIMEOUT)
+        return [first, *rest], received, before_attach, session
+
+    frames, received, before_attach, session = asyncio.run(run())
+
+    assert any("event: overflow" in frame for frame in frames)
+    overflow = next(frame for frame in frames if "event: overflow" in frame)
+    # A control frame carries no id: a client's last-event-id buffer
+    # advances only on a frame that has one, so the client stays able to
+    # resume from the last sequence frame it received.
+    assert "id" not in _fields(overflow)
+    # The frame names every frame the subscriber was never given: the ones
+    # the session published after the last one it read. It read frame 1, and
+    # the session then published STREAM_REPLAY_BUFFER + 2 more.
+    payload = json.loads(_fields(overflow)["data"])
+    assert payload["behind"] == STREAM_REPLAY_BUFFER + 2
+    # The history keeps the last STREAM_REPLAY_BUFFER frames, so the oldest
+    # it still holds is the latest id less that many, plus one.
+    latest = STREAM_REPLAY_BUFFER + 3
+    assert payload["oldest_retained"] == latest - STREAM_REPLAY_BUFFER + 1
+    assert session.overflowed_subscribers == 1
+    # The session counts the frames it withheld from that one subscriber,
+    # which is every frame it published after the last one it read.
+    assert session.frames_withheld == STREAM_REPLAY_BUFFER + 2
+    # The overflowed subscription is released: the subscriber count is back
+    # to what it was before that stream attached.
+    assert session.subscriber_count == before_attach
+    # The publisher neither blocked nor dropped anything for the subscriber
+    # that kept reading: it was given every frame, in order -- the first
+    # frame, the STREAM_REPLAY_BUFFER + 2 that pushed the stalled subscriber
+    # out of the history, and the terminal frame.
+    assert received == list(range(1, STREAM_REPLAY_BUFFER + 5))
+
+
+def test_asking_whether_a_gap_exists_does_not_count_a_gap() -> None:
+    """A query is not a service, so asking it counts nothing.
+
+    ``gap_before`` reads the session's history and answers whether a resume
+    could be served completely. The count of the resumes that could not be
+    served belongs to the serving, so asking the question twice must not
+    count two gaps.
+    """
+    doc_id = "doc_fanout_gap_query"
+
+    async def run() -> tuple[WorkflowSession, dict[str, int] | None, dict[str, int] | None]:
+        session = await session_manager.create_session(doc_id=doc_id, topic="fanout")
+        await session.publish_event(_event(doc_id, EventType.NODE_START, WorkflowStep.INGEST))
+        await session.complete()
+        # The client names a frame the session never published.
+        first = session.gap_before(999)
+        second = session.gap_before(999)
+        return session, first, second
+
+    session, first, second = asyncio.run(run())
+
+    # The query answers the same both times.
+    assert first is not None
+    assert first == second
+    assert first["requested_after"] == 999
+    # Asking counted nothing: a question is not a service.
+    assert session.gaps_served == 0
+
+    # The count belongs to the serving: one resume served one gap.
+    session.note_gap_served()
+    assert session.gaps_served == 1
 
 
 def test_a_dropped_stream_unsubscribes_and_stops_accumulating() -> None:
@@ -393,21 +576,22 @@ def test_a_dropped_stream_unsubscribes_and_stops_accumulating() -> None:
         response = await routes.stream_workflow_events(doc_id)
         body = cast(AsyncGenerator[str, None], response.body_iterator)
         first_frame = await asyncio.wait_for(body.__anext__(), timeout=WAIT_TIMEOUT)
-        assert first_frame.startswith("event: node_start")
+        assert _field(first_frame, "event") == "node_start"
         assert session.subscriber_count == 1
 
         # The client goes away mid-stream.
         await body.aclose()
         assert session.subscriber_count == 0
 
-        # Frames published after the disconnect are not queued for that client,
-        # and a stream that attaches now is closed by the terminal sentinel.
+        # The subscription is gone, so the frames published after the disconnect
+        # are not held for that client, and a stream that attaches now is
+        # closed by the session's terminal frame.
         await session.complete(sections=[{"section_id": "sec_1", "title": "Intro"}])
         return first_frame, session
 
     first_frame, session = asyncio.run(run())
 
-    assert first_frame.startswith("event: node_start")
+    assert _field(first_frame, "event") == "node_start"
     assert session.subscriber_count == 0
     assert session.is_completed is True
 
@@ -415,9 +599,9 @@ def test_a_dropped_stream_unsubscribes_and_stops_accumulating() -> None:
 def test_a_reconnecting_stream_replays_the_session_history_over_http() -> None:
     """A stream opened after completion is closed by the session, not by luck.
 
-    The whole scenario is bounded: an HTTP stream that never receives its
-    sentinel leaves the request suspended forever rather than failing, because
-    the loop stays responsive while the generator waits on the subscription.
+    The whole scenario is bounded: an HTTP stream that never ends leaves the
+    request suspended forever rather than failing, because the loop stays
+    responsive while the generator waits on the subscription.
     """
     doc_id = "doc_fanout_reconnect"
 
@@ -440,13 +624,10 @@ def test_a_reconnecting_stream_replays_the_session_history_over_http() -> None:
 
     assert first.status_code == second.status_code == 200
     for response in (first, second):
-        names = [
-            frame.split("\n")[0][len("event: ") :]
-            for frame in response.text.split("\n\n")
-            if frame.strip()
-        ]
+        frames = [frame for frame in response.text.split("\n\n") if frame.strip()]
+        names = [_field(frame, "event") for frame in frames]
         assert names == ["node_start", "workflow_complete"]
-        assert json.loads(response.text.split("\n")[1][len("data: ") :])["doc_id"] == doc_id
+        assert json.loads(_field(frames[0], "data"))["doc_id"] == doc_id
 
 
 # ---------------------------------------------------------------------------

@@ -347,9 +347,130 @@ Frames carry an id from the session's counter, so a subscriber's position
 is a frame id and a reconnect can name it."
 ```
 
+### Corrections to Task 1
+
+Added after the pre-flight review of this plan against the tree it runs
+against, and after the human partner ruled on the conflict it found.
+
+**Finding.** Task 1 replaces `EventSubscription` and removes `get()` and
+`drain()`. Four call sites in `backend/tests/test_sse_fanout.py` use them:
+`_collect` (L82-89), `_collect_bounded` (L92-99),
+`test_a_mid_run_subscriber_receives_replayed_history_then_live_frames`
+(L189, L194) and `test_the_replay_buffer_is_bounded_to_the_documented_size`
+(L226). This plan named the file but no step adapted them, and Task 1's
+Step 9 note pointed the implementer at the wrong thing.
+
+**Ruling.** The read mechanism changes to `session.next_frame(subscription)`.
+Every existing assertion is preserved unchanged. No test is weakened,
+skipped or deleted.
+
+`_collect` takes the session as well as the subscription:
+
+```python
+async def _collect(
+    session: WorkflowSession, subscription: EventSubscription
+) -> list[WorkflowEvent]:
+    """Read frames until the stream ends. Bound by the caller."""
+    frames: list[WorkflowEvent] = []
+    while True:
+        frame = await session.next_frame(subscription)
+        if frame is None:
+            return frames
+        frames.append(frame[1])
+```
+
+and `_collect_bounded` becomes:
+
+```python
+async def _collect_bounded(
+    session: WorkflowSession, subscription: EventSubscription
+) -> list[WorkflowEvent]:
+    """``_collect`` under a timeout: a stream that never ends fails the test.
+
+    Under the old shared-queue design only one of several subscribers ever
+    received the sentinel, so this is where such a regression surfaces as a
+    ``TimeoutError`` instead of a hung suite.
+    """
+    return await asyncio.wait_for(
+        _collect(session, subscription), timeout=WAIT_TIMEOUT
+    )
+```
+
+`late.drain()` is replaced by reading through the cursor. A subscriber's
+position advances only when a frame is handed to it, so the replayed history
+and the live frames that follow come out of one `next_frame` sequence with no
+duplication — which is exactly what the existing assertions expect. The
+`replayed + await _collect_bounded(late)` shape becomes a single
+`_collect_bounded(session, late)`, and
+`test_the_replay_buffer_is_bounded_to_the_documented_size` reads its frames
+the same way.
+
+### Correction 5 — Task 1: `drain()` is narrowed to the session side
+
+**Finding.** The task review found that `drain()` had been kept as a method
+on `EventSubscription`, which gave the subscriber a back-reference to its
+session and the class a second read path with its own copy of the overrun
+rule. Blueprint §3 says a subscriber holds *"its id, the id of the last
+frame it has read, and an `asyncio.Event`"* — nothing else. A subscription
+built through the documented two-argument constructor also read nothing at
+all, silently.
+
+**Ruling.** `drain()` is a session-side read, not a subscriber-side one. The
+subscriber holds exactly what blueprint §3 says it holds.
+
+`EventSubscription` loses its `drain()` method, its `session` parameter and
+its back-pointer, and is the brief's class verbatim. The session keeps the
+read:
+
+```python
+    def drain(self, subscription: EventSubscription) -> list[WorkflowEvent]:
+        """The frames published since the subscriber last read, without waiting.
+
+        The frames are the ones the session's history still holds, so a
+        subscriber that has fallen behind the history is told so rather
+        than handed a shortened sequence.
+        """
+        oldest = self._oldest_retained_id()
+        if oldest > subscription.position + 1:
+            raise SubscriberOverrun(
+                subscription.subscription_id, subscription.position, oldest
+            )
+        drained: list[WorkflowEvent] = []
+        while True:
+            frame = self._frame_after(subscription.position)
+            if frame is None:
+                return drained
+            subscription.position = frame[0]
+            drained.append(frame[1])
+```
+
+**Task 1 owns the call sites.** `backend/tests/test_stream_contract.py` has
+six `stream.drain()` call sites (L459, L474, L525, L539, L590, L711) and
+`backend/tests/test_sse_fanout.py` has two (`late.drain()`). All eight become
+`session.drain(stream)` and `session.drain(late)`; the session is already in
+scope at every one of them. No assertion changes. That file is therefore in
+Task 1's scope, and Task 3 starts from the adapted file.
+
+### Correction 6 — Task 1 and Task 2 are one indivisible change
+
+**Finding.** The task review found that Task 1 leaves `SubscriberOverrun`
+unhandled in the route: a subscriber that falls behind truncates its
+response with an unhandled exception, where blueprint §5 wants the stream to
+end with an `overflow` control frame. A cursor without an overflow policy is
+not shippable, and the two halves cannot be reviewed apart.
+
+**Ruling.** Task 2's work — the two counters, the route's `overflow` control
+frame and the test that proves it — is done in the same change as Task 1.
+Task 2 is not dispatched as a separate task; its brief is read and applied
+by the same implementer, in the same change.
+
 ---
 
 ### Task 2: The overflow
+
+> **Done as part of Task 1.** See *Correction 6 — Task 1 and Task 2 are one
+> indivisible change*, above. The steps below are applied by Task 1's
+> implementer; they are not dispatched as a separate task.
 
 **Files:**
 - Modify: `backend/src/lmeditor/server/session.py`
@@ -853,6 +974,219 @@ frame id is refused with 400, because serving the wrong frames to a
 client that believes it has resumed is worse than refusing it."
 ```
 
+### Corrections to Task 3
+
+Added after the pre-flight review of this plan against the tree it runs
+against, and after the human partner ruled on the conflict it found.
+
+**Finding 1.** The plan's `gap_before` emits a gap only when the client's next
+wanted frame has rotated *out* of the retained window, which is what blueprint
+§5/§6 say. The plan's own gap test asks for `Last-Event-ID: 999` on a session
+whose newest frame is id 2 — a frame the session never published — which that
+condition does not catch, so the test fails against the implementation it
+tests.
+
+**Ruling 1.** One rule: the server serves what it remembers and names what it
+does not. A request the session never had is named as a gap too.
+
+```python
+    def gap_before(self, last_event_id: int) -> dict[str, int] | None:
+        """What a resume could not be given, if anything.
+
+        The session remembers the last ``STREAM_REPLAY_BUFFER`` frames. A
+        client that was away longer than that is owed frames the session
+        no longer has, and the hole is named rather than papered over.
+
+        A client that names a frame the session never published is owed it
+        too, and is named in the same way: the server serves what it
+        remembers and says what it does not have.
+        """
+        oldest = self._oldest_retained_id()
+        latest = self._latest_event_id
+        rotated_out = last_event_id + 1 < oldest
+        ahead_of_session = last_event_id > latest
+        if not (rotated_out or ahead_of_session):
+            return None
+        self.gaps_served += 1
+        return {"requested_after": last_event_id, "oldest_retained": oldest}
+```
+
+A client that is exactly caught up — naming the newest frame the session
+published — is neither rotated out nor ahead of the session, and is given no
+gap.
+
+**Finding 2.** The route code below subscribes at the client's `Last-Event-ID`
+and leaves it there. A client that reconnects with an id the session has
+rotated past therefore finds no frame after its position, `next_frame` raises
+`SubscriberOverrun`, and the stream ends with an overflow frame and *no*
+frames — while blueprint §5 and §10 require the retained frames to be
+served, preceded by the gap frame.
+
+**Ruling 2.** A subscriber starts after the client's id, or at the oldest
+frame the session still holds when the client's id has rotated out of it:
+
+```python
+        self._next_subscription_id += 1
+        if last_event_id is None:
+            position = self._oldest_retained_id() - 1
+        else:
+            position = max(last_event_id, self._oldest_retained_id() - 1)
+        subscription = EventSubscription(
+            subscription_id=self._next_subscription_id,
+            position=position,
+        )
+```
+
+The gap is still named, because `gap_before` is asked about the id the
+client named, not about the position the subscriber was given.
+
+**Finding 3.** Task 3 makes the frame `id: <n>\nevent: ...\ndata: ...`.
+`backend/tests/test_stream_contract.py` L305-314 parses each frame
+positionally: `lines[0]` must start `"event: "` and `lines[1]` must start
+`"data: "`.
+
+**Ruling 3.** The parser reads the fields by name and asserts the id is
+present:
+
+```python
+        frames = [frame for frame in response.text.split("\n\n") if frame.strip()]
+        assert len(frames) == 3
+
+        names: list[str] = []
+        for frame in frames:
+            fields: dict[str, str] = {}
+            for line in frame.split("\n"):
+                key, _, value = line.partition(":")
+                fields[key] = value.strip()
+            assert fields["id"].isdigit()
+            assert "event" in fields
+            assert "data" in fields
+            name = fields["event"]
+            payload = json.loads(fields["data"])
+            names.append(name)
+            assert payload["event_type"] == name
+            assert set(payload) >= {"event_type", "step", "doc_id", "data"}
+            assert payload["doc_id"] == doc_id
+            assert isinstance(payload["data"], dict)
+```
+
+### Correction 7 — Task 3: the header is declared with `Annotated`, not with a `Header` default
+
+**Finding.** The plan declares the resume header as
+
+```python
+last_event_id: str | None = Header(default=None, alias="Last-Event-ID"),
+```
+
+FastAPI's `Header(...)` returns a `Header` object, and that object becomes the
+function's actual default value. Over HTTP, FastAPI reads the default from the
+parameter's metadata, so a request without the header gets `None` — but a
+**direct call** to the route receives the `Header` object itself. The SSE tests
+drive `routes.stream_workflow_events(doc_id)` directly, so `int(last_event_id)`
+would be called on a `Header` object: a `TypeError`, which is not the
+`ValueError` the route catches, and the tests that call the route directly
+would fail.
+
+**Ruling.** Declare the header with `Annotated`, which keeps a real `None` as
+the function's default and lets FastAPI read the header from the annotation's
+metadata:
+
+```python
+from typing import Annotated
+...
+async def stream_workflow_events(
+    doc_id: str,
+    last_event_id: Annotated[str | None, Header(alias="Last-Event-ID")] = None,
+) -> StreamingResponse:
+```
+
+A direct call then receives `None`, exactly as a request without the header
+does. `Annotated` is already the house spelling for a constrained parameter in
+this tree (`lmeditor/notebooks/__init__.py`).
+
+The header's name is matched case-insensitively: `Last-Event-ID`,
+`last-event-id` and `LAST-EVENT-ID` all reach the route.
+
+### Correction 8 — Task 3: the proofs the plan left unassigned, and the rules the docstrings misstated
+
+Added after the task review of Task 3, which found the behaviour correct on
+every path it could exercise but two binding blueprint §10 proofs unpinned
+and two docstrings stating rules the code does not follow.
+
+**Finding 1 — the rotated-past resume is proved by nothing.** The plan's gap
+test names `Last-Event-ID: 999` on a session whose newest frame is 2 — the
+ahead-of-session case — while blueprint §6 and §10 require the rotated-past
+case: *"a client reconnecting with an id the session has rotated past is
+served the retained frames preceded by a `gap` frame naming the hole"*. The
+line `position = max(last_event_id, self._oldest_retained_id() - 1)` is the
+one that serves it, and nothing pinned it: replacing `max` with `min`, or
+dropping it, failed no test in the suite.
+
+**Ruling 1.** A test is added that proves it. It publishes enough frames that
+the history window rotates, reconnects with an id that has rotated out, and
+asserts that the `gap` frame comes first, that its payload names the hole,
+and that the retained frames follow it in order with strictly increasing
+ids. It must fail if the `max()` is replaced by `min()` or dropped.
+
+**Finding 2 — two docstrings state rules the code does not follow.**
+`gap_before`'s docstring says *"the server serves what it remembers and says
+what it does not have"*, which is not what happens when a client names a
+frame the session has not published yet: the session serves none of what it
+remembers, because the frames it remembers are not the ones the client asked
+for. The gap test's docstring says the client *"asked for the frames after a
+frame the session no longer remembers"* and *"is given what the session still
+has"* — the test asks for a frame the session never published and is given
+nothing.
+
+**Ruling 2.** The rule is the intersection, and the docstrings say so: the
+session serves the frames a resuming client asked for that the history still
+holds, and names what it cannot give. A frame the session has not published
+yet is served when the session reaches it, and until then the stream waits
+for it. The route's own docstring gets the same treatment: the frame-shape
+claim is scoped to the sequence frames, because the two control frames carry
+no `id:` and a `data:` of their own.
+
+**Finding 3 — two of blueprint §10's identity bullets are unproved.** The ids
+are never compared for order or repetition (the only value-level assertion is
+two ids), and nothing asserts the absence of an `id:` line on a control frame
+— the property the whole resume rests on, since a control frame with an id
+would advance every client's last-event-id buffer.
+
+**Ruling 3.** The gap and overflow tests assert that the control frame
+carries no `id:` field, and a test asserts that one stream's ids are
+strictly increasing with no repeats.
+
+**Finding 4 — three smaller gaps in the plan's own steps.**
+- The plan's tests use `WAIT_TIMEOUT`, which does not exist in
+  `backend/tests/test_stream_contract.py`; that file's bound is
+  `STREAM_READ_TIMEOUT`.
+- The plan's tests open a session through the process-wide registry and omit
+  the file's cleanup that takes the session out of it again.
+- The plan's Ruling 3 fixed `test_stream_contract.py`'s frame parser only.
+  `backend/tests/test_sse_fanout.py` parses frames positionally in four
+  places as well and breaks on the `id:` line.
+
+**Ruling 4.** The right constant and the cleanup are applied, and the
+overflow test in `test_sse_fanout.py` is adapted to read its frame's fields
+by name.
+
+**Finding 5 — the header parser accepts things that are not frame ids.**
+`int()` accepts `"5_0"` as 50 and `"١٢"` as 12, and `"-1"` is accepted and
+produces a spurious gap frame, while blueprint §4 says a frame id starts at
+1.
+
+**Ruling 5.** The header must be ASCII decimal digits and at least 1;
+anything else is refused with the 400 the route already returns. The error
+message stays *"Last-Event-ID is not a frame id."*
+
+**Ruling on the gap payload.** The payload keeps the shape blueprint §5 gives
+it — `{"requested_after", "oldest_retained"}` — and the docstring states the
+rule precisely instead. In the ahead-of-session case the two numbers do not
+describe a hole, because nothing is missed: the client will be served the
+frame it named when the session reaches it. No consumer reads those fields
+yet, and adding one to name the session's latest id would change the payload
+the blueprint fixes.
+
 ---
 
 ### Task 4: The desktop client
@@ -887,14 +1221,67 @@ Add to `kotlin/desktop/src/test/kotlin/lmeditor/desktop/net/SseClientTest.kt`:
                 .toByteArray()
         )
         val responses = ArrayDeque(listOf(first, second))
+        var requests = 0
         val http = StubHttpClient {
+            requests += 1
             CompletableFuture.completedFuture(StubResponse(it, 200, responses.removeFirst()))
         }
 
         val events = SseClient(http, "http://example.test").events("doc_1").toList()
 
-        assertEquals(listOf("node_start", "workflow_complete"), events.map { it.eventType.value })
+        assertEquals(listOf("node_start", "workflow_complete"), events.map { it.eventType.wire })
+        assertEquals(2, requests)
         assertEquals("1", http.lastRequest?.headers()?.firstValue("Last-Event-ID")?.orElse(null))
+    }
+
+    @Test
+    fun `a second overflow does not reopen the stream`() = runBlocking {
+        val overflowing = (
+            "id: 1\n" +
+                "event: node_start\n" +
+                "data: {\"event_type\":\"node_start\",\"step\":\"ingest\",\"doc_id\":\"doc_1\",\"data\":{}}\n\n" +
+                "event: overflow\n" +
+                "data: {\"reason\":\"the subscriber fell behind\",\"behind\":3,\"oldest_retained\":2}\n\n"
+            ).toByteArray()
+        // Two overflowing streams, and then an empty one: a client that
+        // reconnects without a bound would open a third request and finish
+        // on the empty one, so the request count is what tells the two
+        // behaviours apart.
+        val responses = ArrayDeque(
+            listOf(ByteArrayInputStream(overflowing), ByteArrayInputStream(overflowing))
+        )
+        var requests = 0
+        val http = StubHttpClient {
+            requests += 1
+            val next = responses.removeFirstOrNull()
+            CompletableFuture.completedFuture(
+                StubResponse(it, 200, next ?: ByteArrayInputStream(ByteArray(0)))
+            )
+        }
+
+        val events = SseClient(http, "http://example.test").events("doc_1").toList()
+
+        assertEquals(listOf("node_start", "node_start"), events.map { it.eventType.wire })
+        assertEquals(2, requests)
+    }
+
+    @Test
+    fun `a comment block with no data is read past`() = runBlocking {
+        val input = ByteArrayInputStream(
+            (": heartbeat\n" +
+                "\n" +
+                "id: 7\n" +
+                "event: node_start\n" +
+                "data: {\"event_type\":\"node_start\",\"step\":\"ingest\",\"doc_id\":\"doc_1\",\"data\":{}}\n\n")
+                .toByteArray()
+        )
+        val http = StubHttpClient {
+            CompletableFuture.completedFuture(StubResponse(it, 200, input))
+        }
+
+        val events = SseClient(http, "http://example.test").events("doc_1").toList()
+
+        assertEquals(listOf("node_start"), events.map { it.eventType.wire })
     }
 ```
 
@@ -905,7 +1292,13 @@ reconnect carried the last id.
 
 **The behaviour asserted is what matters:** the client reads the `event:`
 field, recognises the overflow frame rather than failing on it, reconnects,
-and the reconnect carries `Last-Event-ID` with the last id it saw.
+and the reconnect carries `Last-Event-ID` with the last id it saw. The
+second test pins the bound: the client reconnects **once**, so a second
+overflow ends the stream rather than opening a third request.
+
+`EventType` implements `WireEnum`, whose property is `wire` — the exact
+string the value has on the wire. There is no `value` property, so the
+assertion reads `it.eventType.wire`.
 
 - [ ] **Step 2: Run the test to verify it fails**
 
@@ -942,7 +1335,17 @@ and a method:
                 line.startsWith("event:") -> event = line.substring(6).trim()
                 line.startsWith("id:") -> id = line.substring(3).trim()
                 line.startsWith("data:") -> data.add(line.substring(5).removePrefix(" "))
-                line.isEmpty() -> return SseFrame(event, id, data.joinToString("\n"))
+                line.isEmpty() -> {
+                    if (data.isNotEmpty()) {
+                        return SseFrame(event, id, data.joinToString("\n"))
+                    }
+                    // A block with no data is a comment, and the SSE
+                    // specification dispatches nothing for it. It is read
+                    // past rather than turned into an empty frame the caller
+                    // would fail to decode.
+                    event = null
+                    id = null
+                }
             }
         }
     }
@@ -970,60 +1373,105 @@ Replace `SseClient.events` with:
      * in an `overflow` frame before it closes. That is not a failure: the run
      * is still going, so the client reopens the stream with the id of the last
      * frame it received and carries on. It does that once -- a retry loop needs
-     * a backoff and a budget, which is a different decision.
+     * a backoff and a budget, which is a different decision -- so a second
+     * overflow ends the stream, and the caller sees a run that stopped short.
      */
     fun events(docId: String): Flow<WorkflowEvent> = channelFlow {
         var lastEventId: String? = null
-        while (true) {
-            val request = buildRequest(docId, lastEventId)
-            val response = http.sendCancellable(request, HttpResponse.BodyHandlers.ofInputStream())
-            val body = response.body()
-            var overflowed = false
+        var reconnected = false
+        // The body of the response being read now. A blocked read is not
+        // interrupted by cancellation, so cancellation reaches it by closing
+        // the body; the holder is how the closing thread finds it.
+        val open = AtomicReference<InputStream?>(null)
+        val worker = launch(Dispatchers.IO) {
             try {
-                body.use {
-                    if (response.statusCode() != 200) {
-                        throw BackendError.Refused(response.statusCode(), "the event stream was refused")
-                    }
-                    val reader = BufferedReader(InputStreamReader(it, StandardCharsets.UTF_8))
-                    while (true) {
-                        val frame = readFrame(reader) ?: break
-                        when (frame.event) {
-                            "overflow" -> {
-                                // The run is still going and this subscriber fell
-                                // behind. The stream is reopened with the last
-                                // frame received, so the frames it missed are
-                                // replayed rather than lost.
-                                overflowed = true
-                                break
+                while (true) {
+                    val request = buildRequest(docId, lastEventId)
+                    var overflowed = false
+                    try {
+                        val response = http.sendCancellable(request, HttpResponse.BodyHandlers.ofInputStream())
+                        val body = response.body()
+                        open.set(body)
+                        // A cancellation that lands between the response
+                        // completing and the body being published would
+                        // otherwise leave the body open with nobody to close
+                        // it, and the blocked read below would never end.
+                        // The worker stops here rather than reading a closed
+                        // stream and reporting the result as an unreachable
+                        // backend, which is not what happened.
+                        if (!isActive) {
+                            body.close()
+                            return@launch
+                        }
+                        body.use { stream ->
+                            if (response.statusCode() != 200) {
+                                throw BackendError.Refused(response.statusCode(), "the event stream was refused")
                             }
-                            "gap" -> {
-                                // The server could not give this client the frames it
-                                // asked for, and named the hole. The authoritative
-                                // state is fetched separately; the stream continues.
-                            }
-                            else -> {
-                                frame.id?.let { lastEventId = it }
-                                send(decode(frame.data))
+                            val reader = BufferedReader(InputStreamReader(stream, StandardCharsets.UTF_8))
+                            while (true) {
+                                val frame = readFrame(reader) ?: break
+                                when (frame.event) {
+                                    "overflow" -> {
+                                        // The run is still going and this subscriber fell
+                                        // behind. The stream is reopened with the last
+                                        // frame received, so the frames it missed are
+                                        // replayed rather than lost.
+                                        overflowed = true
+                                        break
+                                    }
+                                    "gap" -> {
+                                        // The server could not give this client the frames it
+                                        // asked for, and named the hole. The hole cannot be
+                                        // filled from the stream: the document's state is
+                                        // the authoritative record, and the stream carries
+                                        // on with what comes next.
+                                    }
+                                    else -> {
+                                        frame.id?.let { lastEventId = it }
+                                        send(decode(frame.data))
+                                    }
+                                }
                             }
                         }
+                    } catch (cause: CancellationException) {
+                        throw cause
+                    } catch (cause: IOException) {
+                        throw BackendError.Unreachable(request.uri().toString(), cause)
+                    } finally {
+                        open.set(null)
                     }
+                    // One reconnect is what this slice covers. A second overflow
+                    // ends the stream: the frames between are gone, and a
+                    // retry loop needs a backoff and a budget, which is a
+                    // different decision.
+                    if (!overflowed || reconnected) {
+                        break
+                    }
+                    reconnected = true
                 }
+                close()
             } catch (cause: CancellationException) {
                 throw cause
-            } catch (cause: IOException) {
-                throw BackendError.Unreachable(request.uri().toString(), cause)
+            } catch (cause: BackendError) {
+                close(cause)
             }
-            if (!overflowed) {
-                break
-            }
+        }
+        awaitClose {
+            worker.cancel()
+            open.get()?.close()
         }
     }
 ```
 
-The loop lives in the `channelFlow`'s producer scope, so the producer is
-cancelled with the flow and `awaitClose` is not needed: the producer owns
-the response body, and `body.use` closes it on every path out of the read
-loop.
+The body is read on a worker, not in the producer scope. A blocked read is
+not interrupted by cancelling the coroutine that made it, so cancellation
+reaches the read by closing the body: `awaitClose` holds the body in an
+`AtomicReference` and closes it, which unblocks the reader. The worker's
+own liveness is checked as soon as it publishes the body, so a cancellation
+that arrives in the moment before the body is published closes it too.
+
+The liveness check needs `import kotlinx.coroutines.isActive` alongside the
+coroutines imports the file already has.
 
 Add the request builder next to it:
 
@@ -1068,6 +1516,192 @@ different decision; a gap, by contrast, is not something to retry blindly,
 because the client is told what it missed and fetches the document's
 state instead."
 ```
+
+### Corrections to Task 4
+
+Added after the task review of Task 3, which found that the desktop client
+decodes every `data:` line as a `WorkflowEvent` — so both the `overflow`
+frame (Task 2) and the new `gap` frame (Task 3) would raise
+`BackendError.Malformed`.
+
+**Correction 9 — the gap frame needs a test of its own.**
+
+**Finding.** The plan's Step 1 test exercises the overflow frame only. The
+client's `when` handles the gap frame too, and blueprint §10's client proof
+is *"the client reads the `event:` field and recognises the two control
+frames rather than failing on them"*. A regression that made the client fail
+on a gap frame would not be caught, and the gap frame is exactly the frame
+the server sends when it cannot serve a client completely.
+
+**Ruling.** A second test is added: a stream carrying a gap frame followed
+by a sequence frame. The client must not fail on the gap frame, must not
+reconnect because of it — blueprint §9: *"a gap, by contrast, is not
+something to retry blindly — the client is told what it missed and re-fetches
+the document's state instead"* — and must deliver the sequence frame that
+follows.
+
+**Correction 10 — the two control frames are told apart by their `event:`
+name, and that is the only thing that tells them apart.**
+
+**Finding.** The server writes the control frames with no `id:` and with a
+`data:` of their own shape (`{reason, behind, oldest_retained}` for the
+overflow, `{requested_after, oldest_retained}` for the gap). Neither is a
+`WorkflowEvent`, and neither carries the field the client's frame type
+expects.
+
+**Ruling.** The client's frame type carries the `event:` name, the `id:` and
+the `data:` text, and the control frames are recognised by their name —
+which is what the plan's Step 3 already does. The name is the discriminator:
+the server names every frame it writes, and the two control frames are
+`overflow` and `gap`. A frame the client does not recognise is a
+disagreement between the two halves of the system, and it is reported rather
+than guessed at — the absence of an `id:` is not a licence to guess that a
+frame is a control frame.
+
+### Correction 11 — Task 4: the brief's Step 4 code deadlocks the pre-existing cancellation test
+
+**Finding.** The brief's Step 4 replaces `SseClient.events` with a version
+that reads the response body in the `channelFlow`'s own producer scope and
+drops `awaitClose` altogether — the brief says *"awaitClose is not needed:
+the producer owns the response body"*. That is wrong.
+
+The tree already holds a test for exactly this: `cancelling an idle stream
+closes and unblocks its reader` cancels the flow while the reader is blocked
+in `readLine()`. A blocked read in the producer scope cannot be interrupted
+— the producer is suspended inside `readLine()`, so `awaitClose` never runs,
+so the body is never closed, so the read never returns and the cancellation
+never completes. The implementer verified this empirically before changing
+anything: the brief's verbatim code ran past 60 seconds against that test
+where the pre-existing code completes.
+
+**Ruling.** The body is read on a worker launched in `Dispatchers.IO`, as
+the pre-existing code did, and the open body is held in an `AtomicReference`
+so that `awaitClose` can close it from the cancelling thread. The worker
+owns the read; the channel's `awaitClose` closes the body, which unblocks
+the read. The reconnect loop lives inside the worker, so the producer stays
+responsive.
+
+This is the shape the credential slice's client already used, and the
+cancellation test that pins it was already in the tree before this task.
+
+**Correction 12 — the brief's test uses the wrong accessor for the wire
+name.**
+
+**Finding.** The brief's Step 1 test asserts `it.eventType.value`, but
+`EventType` implements `WireEnum`, whose property is `wire` — *"the exact
+string this value has on the wire"*. There is no `value` property, so the
+brief's test does not compile.
+
+**Ruling.** The assertion uses `it.eventType.wire`, which is what the JSON
+codec writes and what travels.
+
+### Correction 13 — Task 4: the review of the delivered client
+
+Added after the task review of Task 4. The reviewer's verdict was that the
+frame reading, the id tracking, the `Last-Event-ID` header and the credential
+handling were correct and faithfully matched to the server's wire format, and
+that the deliberate departure from the brief's defective Step 4 code was the
+right call. What it found was an unbounded reconnect and a narrow cancellation
+window.
+
+**Finding 1 — the reconnect was unbounded.** The delivered loop broke only
+when the stream did *not* end with an overflow, so a server that overflowed
+again reopened the stream again, and again. Blueprint §9 is binding: *"It
+does not reconnect in a loop. A retry loop needs a backoff, a budget and some
+operator-visible state about how many attempts have been made, and that is a
+different design. One reconnect on an overflow is what this slice covers."*
+The class docstring's *"It does that once"* claimed a behaviour the code did
+not have.
+
+**Ruling 1.** The client reconnects at most once. A second overflow ends the
+stream. The caller is not misled: `StudioController` already reports *"The
+event stream ended before the run completed."* when the flow ends without a
+terminal frame, so a run that stopped short is reported as such rather than
+as a run that finished. A test pins the bound by counting the requests.
+
+**Finding 2 — a cancellation landing between the response arriving and the
+body being published hung the flow.** The worker published the body to the
+`AtomicReference` after the response completed; a cancellation in that window
+left `awaitClose` with nothing to close, and the worker's blocked read was
+never interrupted.
+
+**Ruling 2.** After publishing the body, the worker checks its own liveness
+and closes the body if the scope has already been cancelled, so either
+`awaitClose` sees the body or the worker sees the cancellation.
+
+**Finding 3 — a blank line with no data became an empty frame.** The
+pre-existing reader required `data.isNotEmpty()` before treating a blank
+line as a frame terminator, and the SSE specification dispatches nothing for
+an empty data buffer. A stray comment block would have failed the whole run
+with `BackendError.Malformed` where it used to be read past.
+
+**Ruling 3.** A blank line ends a frame only when there is data. A block with
+no data is read past, and the event name and id it carried are discarded
+with it.
+
+**Finding 4 — the gap comment overstated what the code does.** It said *"The
+authoritative state is fetched separately"*, and this code fetches nothing.
+
+**Ruling 4.** The comment says what is true: the hole cannot be filled from
+the stream, the document's state is the authoritative record, and the stream
+carries on with what comes next.
+
+**Finding 5 — the overflow test pinned the request count only implicitly.** A
+third request surfaced as a `NoSuchElementException` from the stub rather
+than as an assertion failure.
+
+**Ruling 5.** The test counts the requests and asserts the number.
+
+**Finding 6 — Correction 10's ruling was looser than the implementation.** It
+said a frame with no `id:` is a control frame; the name is the discriminator.
+
+**Ruling 6.** Correction 10 is corrected above.
+
+### Correction 14 — Task 4: the two coverage gaps the fix round left
+
+Added after the scoped re-review of Task 4's fix round, which returned every
+finding ADDRESSED and no new Critical or Important breakage, and named two
+coverage gaps.
+
+**Finding 1 — the read-past of a comment block is not pinned.** The fix for
+a blank line with no data is applied, but no test exercises it, so a
+regression would not be caught. It is deterministically pinnable: a stream
+whose first block is a comment with no data (`": heartbeat\n\n"`) followed by
+a valid sequence frame. Without the fix, `readFrame` returns an empty frame,
+`decode("")` raises, and the flow fails with `BackendError.Malformed`; with
+the fix the block is read past and the frame is delivered.
+
+**Ruling 1.** A test is added.
+
+**Finding 2 — the cancellation window is not pinned, and cannot be.** The
+window lies between two adjacent statements with no suspension point
+between them, so a cancellation there can only be *requested* concurrently,
+never *observed*. To land one deterministically a test would have to block
+the seam at `response.body()`, and the without-fix run only fails when
+`awaitClose` ran before the body was published — otherwise `awaitClose`
+itself closes the body and the without-fix run passes. Establishing that
+ordering would mean reaching into the coroutine's job tree or sleeping, and
+the without-fix failure mode is a *hang*, not an assertion.
+
+**Ruling 2.** The fix stands on inspection and on the interleaving analysis:
+a cancellation before the body is published is caught by the worker's own
+liveness check, one after it is caught by `awaitClose`, and one between the
+two is caught by the worker's check as well. Every ordering closes the body.
+No test is written, because a test that only fails when the race is hit is a
+flaky test, and this repository's rule is that a test which pins a fix is
+verified to fail without it. This is recorded as an unpinned defensive fix
+for the final review to triage.
+
+**Finding 3 — the cancellation path reported itself as an unreachable
+backend.** After the worker closes the body itself, the read of a closed
+stream raises `IOException`, which the client maps to
+`BackendError.Unreachable` — a misleading label for a cancellation. It is
+benign today, because a cancelled worker implies a closed channel and the
+error is dropped, but it would become visible if the worker were ever made
+cancellable independently of the channel.
+
+**Ruling 3.** The worker stops when it finds itself cancelled, rather than
+reading a closed stream and reporting the result as an unreachable backend.
 
 ---
 
@@ -1156,3 +1790,4 @@ old signature as a defaulted parameter, so the existing call sites and the
 direct calls in the tests keep working. `EventSubscription` loses its
 `frames` parameter and gains `position`; the only construction site is
 `subscribe()`, which Task 1 changes in the same step.
+

@@ -5,8 +5,8 @@ import json
 import logging
 import uuid
 from pathlib import Path
-from typing import Any, AsyncGenerator
-from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile, status
+from typing import Annotated, Any, AsyncGenerator
+from fastapi import APIRouter, File, Form, Header, HTTPException, Query, UploadFile, status
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field, model_validator
 from pydantic import ValidationError as PydanticValidationError
@@ -62,6 +62,7 @@ from lmeditor.server.routes_helpers import (
 )
 from lmeditor.server.session import (
     ActiveSessionExistsError,
+    SubscriberOverrun,
     WorkflowSession,
     scorecard_payload,
     session_manager,
@@ -1042,23 +1043,54 @@ def _kind_from_extension(path: Path) -> SourceKind:
     return SourceKind.TEXT
 
 
+def _frame_id(value: str) -> int:
+    """The frame id the client named, or a ``ValueError`` if it names none.
+
+    A frame id is the session's own sequence number: ASCII decimal digits
+    counting from 1. ``int()`` on its own would read "5_0" as 50 and an
+    Arabic-Indic "١٢" as 12, and would accept a negative id that no frame
+    ever carried.
+    """
+    if not value.isascii() or not value.isdigit() or not value.strip("0"):
+        raise ValueError("not a frame id")
+    return int(value)
+
+
 @router.get(
     "/stream/{doc_id}",
     response_class=StreamingResponse,
     summary="Stream real-time workflow events via SSE",
 )
-async def stream_workflow_events(doc_id: str) -> StreamingResponse:
+async def stream_workflow_events(
+    doc_id: str,
+    last_event_id: Annotated[str | None, Header(alias="Last-Event-ID")] = None,
+) -> StreamingResponse:
     """Connect to Server-Sent Events stream for a specific document workflow.
 
-    Each frame is ``event: <event_type>`` plus a ``data:`` JSON envelope of
-    ``{event_type, step, doc_id, data}``. The terminal frames are exactly
-    ``workflow_complete`` and ``workflow_error``, followed by the ``None``
-    sentinel that closes this subscriber's stream.
+    Each sequence frame is ``id: <n>`` plus ``event: <event_type>`` and a
+    ``data:`` JSON envelope of ``{event_type, step, doc_id, data}``. The
+    terminal frames are exactly ``workflow_complete`` and ``workflow_error``,
+    after which the stream closes.
+
+    The two control frames -- ``gap`` and ``overflow`` -- are not sequence
+    frames: they carry no ``id:``, and their own ``data:`` names what
+    happened rather than reporting an event.
 
     Every request gets its own subscription, so concurrent streams on one
-    document each receive the full frame sequence instead of dividing it, and a
-    stream attached to a finished session is closed immediately from the
-    session's replay buffer rather than waiting on a queue nobody writes to.
+    document each receive the full frame sequence instead of dividing it.
+
+    A client that reconnects names the last frame it received in
+    ``Last-Event-ID``, and is given the frames after it that the session
+    still holds. What the session cannot give is named rather than passed
+    over: a client that was away longer than the session remembers is told
+    what it missed with a ``gap`` frame, and a client that names a frame
+    the session has not published yet is told that too -- it is served that
+    frame once the session reaches it.
+
+    A subscriber that falls behind the session's history cannot be given the
+    frames it has not read, because they have left it. Its stream ends with
+    an ``overflow`` control frame instead, whose ``data:`` names what was
+    missed, so the client knows the run is still going and reconnects.
     """
     session = await session_manager.get_session(doc_id)
     if not session:
@@ -1067,19 +1099,58 @@ async def stream_workflow_events(doc_id: str) -> StreamingResponse:
             detail=f"Workflow session '{doc_id}' not found.",
         )
 
-    async def event_generator() -> AsyncGenerator[str, None]:
-        subscription = await session.subscribe()
+    resume_from: int | None = None
+    if last_event_id is not None:
         try:
+            resume_from = _frame_id(last_event_id)
+        except ValueError as exc:
+            # A header that is not a frame id is refused rather than ignored:
+            # serving the wrong frames to a client that believes it has
+            # resumed is worse than refusing it.
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Last-Event-ID is not a frame id.",
+            ) from exc
+
+    async def event_generator() -> AsyncGenerator[str, None]:
+        subscription = await session.subscribe(resume_from)
+        try:
+            if resume_from is not None:
+                gap = session.gap_before(resume_from)
+                if gap is not None:
+                    # The gap frame carries no id: a client's last-event-id
+                    # buffer advances only on a frame that has one, so the
+                    # client stays able to resume from where it was.
+                    session.note_gap_served()
+                    payload = json.dumps(gap)
+                    yield f"event: gap\ndata: {payload}\n\n"
             while True:
-                event = await subscription.get()
-                if event is None:
-                    # Terminal sentinel: this stream is finished.
+                try:
+                    frame = await session.next_frame(subscription)
+                except SubscriberOverrun as overrun:
+                    # The subscriber fell behind: the frames it has not read
+                    # have left the session's history, so it can never be
+                    # given them. It is ended with the reason, and it
+                    # reconnects with the id of the last frame it received.
+                    payload = json.dumps(
+                        {
+                            "reason": "the subscriber fell behind",
+                            "behind": overrun.frames_missed,
+                            "oldest_retained": overrun.oldest_retained,
+                        }
+                    )
+                    yield f"event: overflow\ndata: {payload}\n\n"
                     break
+                if frame is None:
+                    # The session is finished and this subscriber has read
+                    # the terminal frame.
+                    break
+                event_id, event = frame
                 payload = json.dumps(event.model_dump(mode="json"))
-                yield f"event: {event.event_type.value}\ndata: {payload}\n\n"
+                yield f"id: {event_id}\nevent: {event.event_type.value}\ndata: {payload}\n\n"
         finally:
-            # A dropped client must not keep a queue alive or keep accumulating
-            # frames it will never read.
+            # A dropped client must not keep a subscription alive or keep a
+            # position that nothing will ever read.
             await session.unsubscribe(subscription)
 
     return StreamingResponse(

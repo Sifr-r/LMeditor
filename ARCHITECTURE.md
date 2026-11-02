@@ -4668,8 +4668,12 @@ recorded here so the next engineer knows they exist:
 - The seam's response is **5.6×** the request bytes.
 - The semantic model's vectors still travel per query — 820 KB at 100 chunks
   and 40.6 MB at 5 000.
-- The SSE frames carry no `id:`, the whole replay buffer is resent, the
-  per-subscriber queue is unbounded, and there is no cancellation path.
+- **The SSE frames carried no `id:`, the whole replay buffer was resent, the
+  per-subscriber queue was unbounded, and there was no cancellation path.**
+  All four are closed in §33: the frames carry `id:`, a subscriber is a cursor
+  into the session's bounded history rather than a queue of its own, a
+  resuming client is given the frames after the one it named and nothing
+  else, and a dropped stream releases its subscription and closes its body.
 - `compute_chunk_id` is **188×** slower.
 - The Kotlin Word reader is **1.9–4.2×** slower than `python-docx`.
 - `text.retrieval.rank` needs a contract extension, and a contract change
@@ -4691,7 +4695,10 @@ recorded here so the next engineer knows they exist:
   was re-aligned in this round.
 - The section-split twin is held by neither a shared corpus nor the harness.
 - The `token_delta` whole-sequence replay is not caught: a complete fix needs
-  a frame identity published by the backend and carried in `StudioState`.
+  a frame identity published by the backend and carried in `StudioState`. The
+  backend now publishes the identity — every sequence frame carries an `id:`,
+  since §33 — but the reducer is not given it, so the suffix test stands and
+  the whole-sequence replay is still not caught.
 - A streamed frame identical to the section's current tail is treated as a
   replay.
 - A user-supplied Word style can still declare `w:basedOn` pointing at
@@ -5246,4 +5253,429 @@ The hosted CI agrees. On PR #4 the gate passed on both platforms:
 Those runs are the first to exercise the credential end to end on Linux,
 where the desktop client is not part of the tier but the gateway, the
 release scripts and the live HTTP round trip are.
+
+## 33. The SSE stream's backpressure, identity and resume — 2026-11-02
+
+The second item of the §30 follow-up is closed. The live SSE stream no longer
+accumulates a per-subscriber queue, its frames carry an identity, a client
+that reconnects is served what it asked for and is told what it cannot have,
+and a dropped stream is released. The authoritative contract is
+`docs/sse-backpressure-blueprint.md`; it was written before either half of the
+implementation, so that the server and the client could not drift from each
+other. The plan that carried it out is
+`docs/superpowers/plans/2026-11-02-sse-backpressure.md`.
+
+### 33.1 What the finding was
+
+§29.6 recorded four defects in one line: *"The SSE frames carry no `id:`, the
+whole replay buffer is resent, the per-subscriber queue is unbounded, and there
+is no cancellation path."*
+
+They are one defect seen from four sides. A subscriber held **its own copy** of
+the frames it had not read yet. That copy grew for as long as the subscriber
+stopped reading, and a subscriber that stopped reading was usually a client
+that had disconnected — so the memory it left behind belonged to a connection
+that no longer existed. Nothing bounded it, nothing reclaimed it, and nothing
+told the client it had fallen behind.
+
+The other three follow from the same shape. Without an `id:` on a frame, a
+reconnecting client could not say where it had got to, so the server had no
+choice but to resend the whole replay buffer. Without a cancellation path, a
+dropped client left its subscription alive, and the publisher went on copying
+frames into a queue nobody would read.
+
+### 33.2 The queue was removed, not capped
+
+The obvious fix is to cap the queue. The fix that was made is better: the
+queue is **gone**.
+
+The session already keeps the frames it published, in a bounded history —
+`STREAM_REPLAY_BUFFER` = 512 frames. A subscriber does not need a copy of the
+frames it has not read; it needs to say **where it got to**. So a subscriber
+became a position in that history:
+
+| | |
+|---|---|
+| `EventSubscription(subscription_id, position)` | the id of the last frame the subscriber has read |
+| `EventSubscription._wakeup` | an `asyncio.Event`, so that publishing wakes every subscriber and no subscriber's wake-up can be consumed by another |
+| what it does **not** hold | frames |
+
+A subscriber's memory is now a fixed number of bytes, whatever the run does
+and however many frames pass by. A hundred stalled subscribers cost what one
+stalled subscriber costs. The unbounded memory is not capped — it is
+structurally impossible.
+
+`backend/tests/test_sse_fanout.py::test_a_subscriber_holds_no_frames_of_its_own`
+is the proof, and
+`test_the_replay_buffer_is_bounded_to_the_documented_size` pins the history's
+own bound, which did not change.
+
+### 33.3 The mechanism
+
+Reading is a question to the session, not a walk of a private queue.
+`WorkflowSession.next_frame(subscription)` returns the frame after the
+subscriber's position, or `None` when the session is finished and the
+subscriber has read the terminal frame. `WorkflowSession.drain(subscription)` is
+the non-blocking form, for a session that may never terminate.
+
+The overrun rule is **written once**. `_raise_if_behind(subscription)` decides
+whether a subscriber has fallen behind the history and, when it has, raises
+`SubscriberOverrun` and counts the denial. Both reads go through it, so the two
+cannot drift — which they did, once: `drain()` raised without counting and
+`next_frame()` counted, so the two disagreed about the same subscriber.
+
+The publisher never blocks and never copies: `publish_event` contains no
+`await`, and the frames a subscriber has not read are found in the history when
+it asks for them.
+`backend/tests/test_sse_fanout.py::test_a_slow_sync_ingest_leaves_the_event_loop_responsive`
+is the proof that a slow ingest does not stop the loop.
+
+### 33.4 The three decisions, and where each is proved
+
+The blueprint took three decisions, and the rest of the design follows from
+them.
+
+**1. A subscriber that falls behind is disconnected, and the disconnect is
+recoverable.**
+
+A subscriber that has fallen behind can never be given the frames it has not
+read, because they have left the history. The route catches `SubscriberOverrun`
+and ends the stream with an `overflow` control frame naming what was missed —
+`{"reason", "behind", "oldest_retained"}` — so the client knows the run is
+still going and can reconnect with the id of the last frame it received.
+
+`behind` is the number of frames the subscriber was **never given**: the ones
+the session published after the last one it read. That is what the blueprint's
+§7 means by *"frames a subscriber was never given because it fell behind"*, and
+it is why the blueprint's own example has `behind` greater than
+`oldest_retained`. The frames that are gone for good stay derivable — they are
+the ones between the subscriber's position and `oldest_retained`.
+
+- Proved on the server by
+  `backend/tests/test_sse_fanout.py::test_a_subscriber_that_fell_behind_is_told_and_disconnected`:
+  the overflowed stream ends with the control frame, **the overflowed
+  subscription is released** — the session's subscriber count returns to what
+  it was — and the other subscriber kept receiving every frame in order,
+  because the publisher does not block and drops nothing for them.
+- Proved on the client by
+  `SseClientTest.kt::an overflow frame ends the stream and the client reconnects with its last id`
+  and `::a second overflow does not reopen the stream`.
+
+**2. A subscriber's memory is bounded, and the bound is small.**
+
+- Proved by `test_a_subscriber_holds_no_frames_of_its_own` and
+  `test_the_replay_buffer_is_bounded_to_the_documented_size`.
+
+**3. A resume the server cannot serve completely says so.**
+
+The server serves what it remembers and names what it does not. The rule is
+the **intersection**: the frames the resuming client asked for that the history
+still holds. A frame the session has not published yet is served when the
+session reaches it; until then the stream waits. What cannot be served is
+named in a `gap` control frame — `{"requested_after", "oldest_retained"}` —
+which is emitted both when the client's id has rotated out of the history and
+when it names a frame the session has not reached.
+
+- Proved by
+  `backend/tests/test_stream_contract.py::test_a_reconnect_the_session_can_no_longer_serve_is_told_the_gap`
+  (the gap frame, then the retained frames) and
+  `::test_a_reconnect_with_an_id_the_session_has_rotated_past_is_served_what_is_left`
+  (the rotated-past case, which is the one the rule exists for).
+- Proved on the client by
+  `SseClientTest.kt::a gap frame names what was missed and the stream carries on`.
+
+### 33.5 Frame identity
+
+The identity is the SSE specification's own: a frame may carry an `id:`, and a
+client reconnecting sends the last id it saw in `Last-Event-ID`. The server
+puts the id on **sequence frames only**. The two control frames carry none, and
+that is load-bearing — a control frame with an id would advance every client's
+last-event-id buffer, and the resume would then be wrong in a way that looks
+like a correct stream.
+
+| | |
+|---|---|
+| the id | contiguous from 1, strictly increasing, no repeats |
+| a sequence frame | `id: <n>`, then `event: <event_type>`, then `data: <json>` |
+| a control frame | `event: gap` or `event: overflow`, and **no** `id:` |
+| a resuming client | sends `Last-Event-ID: <n>` |
+| a `Last-Event-ID` that is not ASCII decimal digits from 1 | refused with **400**, before the `StreamingResponse` is built |
+
+The refusal is a refusal, not a repair. A client that believes it has resumed
+from a frame it never received is worse off than one told its header was
+nonsense, so the route refuses rather than guessing.
+
+- Proved by `test_the_ids_of_one_stream_go_up_and_never_repeat`,
+  `test_a_reconnect_with_the_last_event_id_is_served_exactly_the_frames_after_it`,
+  `test_a_last_event_id_that_is_not_a_frame_id_is_refused` and
+  `test_a_last_event_id_that_is_not_a_frame_id_in_any_other_spelling_is_refused`.
+
+### 33.6 The client's half
+
+The desktop client had to change in four ways, and each of them was a
+behaviour the old client did not have.
+
+- It reads the `event:` field and recognises the two control frames instead of
+  decoding them as events. Before this, the `overflow` and `gap` frames were
+  `BackendError.Malformed` — the client failed on exactly the frames the
+  server sends to tell it something.
+- It hands the two control frames to its caller. They are the server's word
+  about the stream itself, and a caller that cannot see them cannot tell a run
+  that lost frames from one that did not. They arrive as messages of their own
+  — `SseMessage.Gap` and `SseMessage.Overflow` — beside the run's events,
+  carrying what they say. A control frame whose payload the client cannot read
+  is `BackendError.Malformed`, not a frame to skip.
+- It reconnects **once**. A retry loop needs a backoff and a budget, which is a
+  different decision; so a second overflow ends the stream and the caller sees
+  a run that stopped short, rather than a loop that never stops.
+- It closes the body when the flow is cancelled, so a blocked read is
+  unblocked. The body is read on a worker in `Dispatchers.IO` and held in an
+  `AtomicReference` that `awaitClose` closes.
+
+`SseMessage` is a sealed type with three cases — `Event`, `Gap` and
+`Overflow` — so the notices cannot be mistaken for events and cannot be
+dropped by a caller that does not handle them. `StudioController` puts both
+notices in `StudioState.notice`, the channel the desktop already uses for
+"something happened the operator should know", and not in `StudioState.error`,
+because the run continued.
+
+The gap notice distinguishes the two cases the payload describes. When the
+frames really are gone it names them; when the client resumed **ahead** of
+the session — naming a frame the session has not published yet — nothing is
+missing, and the notice says that rather than claiming a loss. The overflow
+notice says how many frames the server withheld and that it ended that stream.
+It does not claim the stream was reopened, because the client reopens it on
+the first overflow only, and a second one ends the run instead.
+
+The end of a stream is not a failure: a finished run is a finished stream. And
+the honesty of the bounded stop rests on `StudioController`, which already
+reports *"The event stream ended before the run completed."* when the flow
+ends without a terminal frame — `RunReducer` sets `status = "completed"` only
+on `WORKFLOW_COMPLETE`, so a second overflow, which delivers no terminal frame,
+leaves the status running and the branch fires.
+
+### 33.7 What the work found along the way
+
+The slice found more defects than it set out to fix, and two of them were in
+the plan that was supposed to describe the work.
+
+**FastAPI's `Header(default=None, …)` makes the `Header` object the function's
+actual default.** Over HTTP, FastAPI reads the default from the parameter's
+metadata, so a request without the header gets `None` — but a **direct** call
+to the route receives the `Header` object itself, and `int(last_event_id)` then
+raised `TypeError`, which is not the `ValueError` the route catches. The SSE
+tests drive the route directly, so at least two of them would have failed. The
+header is now declared as
+`Annotated[str | None, Header(alias="Last-Event-ID")] = None`, which keeps a
+real `None` as the default.
+
+**`int()` is not a frame-id parser.** `int("5_0")` is `50`, `int("١٢")` is
+`12` — Arabic-Indic digits — and `int("-1")` is a frame id. The rule is ASCII
+decimal digits from 1, and anything else is refused with the 400.
+
+**The plan's own gap test contradicted the plan's own rule.** It asked for
+frame 999 on a session whose newest frame was 2 — a frame the session never
+published — so it exercised a case the rule did not cover and missed the case
+the rule existed for. The rotated-past case now has its own test, and it is
+verified to fail if the rule is changed.
+
+**A resumed subscriber was left at an id the session had rotated past**, so it
+was given an `overflow` frame instead of the frames the session still held. A
+subscriber starts after the client's id, or at the oldest frame the session
+still holds: `position = max(last_event_id, oldest_retained - 1)`.
+
+**The desktop client's reconnect was unbounded.** The loop broke only when the
+stream did *not* end with an overflow, so a second overflow reopened the stream
+again, and again — exactly the retry loop the design forbids. The class
+docstring's *"It does that once"* claimed a behaviour the code did not have.
+
+**A cancellation landing between the response arriving and the body being
+published hung the flow.** `awaitClose` had no body to close, and the worker's
+blocked read was never interrupted.
+
+**The plan's own Task 4 code deadlocked the pre-existing cancellation test.**
+It read the response body in the `channelFlow`'s own producer scope and dropped
+`awaitClose`, on the stated ground that "the producer owns the response body".
+The tree already held the test that says otherwise —
+`cancelling an idle stream closes and unblocks its reader` — and the plan's
+code ran past 60 seconds against it where the pre-existing code completes. The
+plan now carries the corrected code in place, so a reader following it does not
+write the implementation that hangs.
+
+**The client reported a cancellation as an unreachable backend.** The worker
+fell through into `body.use` and read a stream that had just been closed, and
+the `IOException` was mapped to `BackendError.Unreachable`. It now stops when
+it finds itself cancelled.
+
+**A blank line with no data became an empty frame**, which was a
+`BackendError.Malformed`. A block with no data is now read past.
+
+**The reducer's account of its own limitation had become false.** `RunReducer`
+said that catching a whole-sequence replay *"needs an id on the frame, which
+the wire does not carry yet"*. The wire now carries one — the id is on the SSE
+frame — so the statement was corrected to say what is actually true: the id is
+not in the event's data, so the reducer is not given it. The limitation stands
+and the suffix test stays; the reason for it changed, and the docstring now
+names the reason that still holds.
+
+A final review of the whole branch, after every task had passed its own
+review, found four more. It ran thirteen mutation experiments, each reverted
+and each caught by exactly the expected test, and re-derived every count in
+this section from the evidence rather than from the prose.
+
+**The client threw away what the server told it.** The server named what a
+client missed and sent it in the control frame's data; the client read the
+frame, recognised the name, and dropped the payload. Its public API returned
+`Flow<WorkflowEvent>`, so there was no channel by which a notice could reach
+the caller. The run ended looking successful while the state was silently
+short — and for a `token_delta` the document text was silently missing frames,
+which the reducer's suffix test cannot detect, because it catches a repeated
+frame and not a missing one. Fixed in §33.6.
+
+**`frames_withheld` counted the wrong quantity.** The blueprint defines it as
+*"frames a subscriber was never given because it fell behind"*, and the
+implementation counted the frames that had left the history — the ones gone
+for good. In this repository's own scenario the subscriber was never given
+514 frames and the counter recorded 2. The blueprint's own example payload
+settles the meaning: `behind` is greater than `oldest_retained`, which is
+only true of how far behind the subscriber is. Both the counter and the
+payload's `behind` now carry the frames never given; the frames permanently
+gone stay derivable from `oldest_retained`.
+
+**`gap_before()` was a query that counted.** It read like a pure question and
+incremented `gaps_served` on the way, so asking it twice counted two gaps. It
+is a query now, and the counting belongs to `note_gap_served()`, which the
+route calls at the one place a gap is served.
+
+**A cold-start flake in an unrelated test.**
+`test_approval_resumes_the_real_graph_and_completes` waited two seconds for a
+worker that loads model weights — 26.9 seconds on a cold start, against
+8.1 seconds warm. It was flaky before this slice and would have made the
+hosted gate flaky with it, so the budget was raised to half a minute and the
+reason recorded in the test.
+
+### 33.8 What it proves, and what it does not
+
+What it proves: that the live stream's subscriber memory is bounded and small,
+that a subscriber which falls behind is told and released, that the frames
+carry an identity a client can resume from, that a resume the server cannot
+serve completely is named rather than passed over, that a header which is not a
+frame id is refused, and that a dropped stream ends without leaving a
+subscription behind.
+
+What it does **not** prove:
+
+- **The stream is not lossless for a client that was away longer than the
+  session's memory.** That client gets a `gap`, and the notice naming what it
+  missed now reaches the operator. What it does **not** get is the re-fetch
+  of the document's state that would make it whole again. **That re-fetch is
+  not implemented** — the blueprint puts it out of scope for this slice, and
+  it stays out of scope.
+- **The `token_delta` whole-sequence replay is still not caught.** The backend
+  now publishes a frame identity — the first of the two things §29.6 said the
+  fix needed — but the identity is on the SSE frame and not in the event's
+  data, so the reducer is not given it and still uses the suffix test.
+  Carrying the id into `StudioState` is undone.
+- **Two defensive paths are unpinned.** The cancellation window between the
+  response completing and the body being published is closed but not pinned by
+  a test: the window lies between two adjacent statements with no suspension
+  point, so a cancellation there can only be requested concurrently, never
+  observed, and the without-fix failure mode is a hang rather than an
+  assertion. A test that only fails when the race is hit is a flaky test, and
+  this repository's rule is that a test which pins a fix is verified to fail
+  without it. The `return@launch` liveness path is likewise not directly
+  exercised; the pre-existing cancellation test covers the blocked-read path.
+- **The `event:` and `id:` of a no-data block are discarded without a test
+  pinning it.** The server writes every frame with data and never emits a
+  comment block, so the path is reachable only by an intermediary that injects
+  one.
+- **`StudioState.notice` holds one notice, and the last one wins.** A gap
+  notice names frames that are gone for good; an overflow notice says the
+  stream fell behind. If an overflow follows a gap on the same run, the
+  overflow's notice replaces the gap's, and the permanent loss is quieter than
+  it was. Nothing is dropped silently — the server's `gaps_served` and
+  `frames_withheld` counters record both — but the operator sees one notice,
+  not a history of them. A second field would fix it, and the slice did not
+  add one.
+- **`StudioController`'s *"the event stream ended before the run completed"*
+  branch and `HttpTransport`'s `onCancellation` handler are outside this
+  slice's files, and are not covered by a test in the desktop module.**
+- **macOS and Python 3.12 remain unexercised** by the CI matrix.
+
+### 33.9 The ledger
+
+The §29.6 finding list is corrected: the four SSE defects are closed, and the
+line says so. The `token_delta` finding stays — one of the two things it names
+is now done — and says which. The rest of the list is untouched: the
+declared-but-uncompared parity witnesses, the C1 control gap, the vault
+default, the unpinned dependencies and the rest all stand.
+
+`docs/production-readiness.md` is renumbered after this item.
+
+No requirement in `docs/replacement/requirements.json` moves. The gates in
+that registry are measurements this slice did not make — `R.05` needs the p95
+latency and memory of three benchmarked corpora, and `R.06` needs
+local-interaction latency measured apart from model latency — and the
+nearest requirement, `R.08`, was closed by the credential slice.
+
+### 33.10 The verification
+
+The local portable gate passes on this tree, and its evidence is kept under
+`build/release/run-*`.
+
+| | |
+|---|---|
+| Kotlin tests | **1,081** across 15 modules, 0 failures, 0 errors, 0 skipped (desktop 140) |
+| Strict Python typing | **135 source files**, clean for `--platform linux` and `--platform win32` |
+| Backend suite (full) | **1,749 passed**, 0 failed |
+| Backend suite (portable) | 1,725 passed, 5 deselected, 0 failed |
+| Kotlin parity | 26 agreed, 0 disagreed, 0 skipped |
+| Live HTTP round trip | every check passed |
+
+The evidence for this run is `build/release/run-jpm08wa3`. The five portable
+deselections and the three excluded Word modules are recorded beside it in
+`external-checks.json`, and the full suite's own log is kept beside them as
+`pytest-full-suite.log`, because the gate itself runs only the portable scope.
+
+The baseline was 1,075 Kotlin tests and 1,740 backend tests. The slice adds
+**6** Kotlin tests and **9** backend tests:
+
+| | |
+|---|---|
+| `test_a_subscriber_holds_no_frames_of_its_own` | the subscriber holds no frames of its own |
+| `test_a_subscriber_that_fell_behind_is_told_and_disconnected` | the overflow frame, the release of the subscription, the other subscriber keeping every frame, and the count of the frames withheld |
+| `test_a_reconnect_with_the_last_event_id_is_served_exactly_the_frames_after_it` | the exact resume |
+| `test_a_reconnect_the_session_can_no_longer_serve_is_told_the_gap` | the gap frame |
+| `test_a_reconnect_with_an_id_the_session_has_rotated_past_is_served_what_is_left` | the rotated-past resume |
+| `test_the_ids_of_one_stream_go_up_and_never_repeat` | the identity |
+| `test_a_last_event_id_that_is_not_a_frame_id_is_refused` | the 400 |
+| `test_a_last_event_id_that_is_not_a_frame_id_in_any_other_spelling_is_refused` | the 400, in every other spelling |
+| `test_asking_whether_a_gap_exists_does_not_count_a_gap` | asking the question is not serving the resume |
+
+The six Kotlin tests are `an overflow frame ends the stream and the client
+reconnects with its last id`, `a second overflow does not reopen the stream`, `a
+comment block with no data is read past`, `a gap frame names what was missed
+and the stream carries on`, `a control frame the client cannot read is
+reported` and `the stream's control frames reach the operator as notices`.
+
+Several of the new tests were verified to **fail without** their fix and to
+pass with it, because a test that cannot fail proves nothing. The recorded
+mutations, each reverted, each caught by a failing test:
+
+- the route's overflow handling reverted — the `SubscriberOverrun` escaped the
+  generator;
+- `max()` replaced by `min()`, and `max()` dropped — the rotated-past resume;
+- an `id:` line added to a control frame — the control-frame assertions;
+- the unbounded reconnect loop — `a second overflow does not reopen the
+  stream`, which failed with the loop's third request;
+- the read-past reverted — `a comment block with no data is read past`, which
+  failed with `BackendError.Malformed`;
+- the client's control-frame handling — the two new desktop control-frame
+  tests, which failed with `BackendError.Malformed` because the control frame
+  was decoded as an event;
+- the client's notice delivery — the controller's test, which failed with no
+  notice at all when the messages were dropped;
+- the counter's arithmetic — the overflow test, which failed on the count;
+- the gap counter's ownership — the gap query's test, which counted two gaps
+  where it should have counted none.
 

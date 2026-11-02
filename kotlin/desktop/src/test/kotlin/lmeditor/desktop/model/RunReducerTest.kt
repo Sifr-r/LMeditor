@@ -266,8 +266,8 @@ class RunReducerTest {
         // Nothing is lost -- the section keeps every character it was given
         // -- but it is counted twice. The reducer cannot tell that frame from
         // a new frame that carries the same text, because the state and the
-        // frame it is given are the same in both cases; catching it needs an
-        // id on the frame, which the wire does not carry yet.
+        // frame it is given are the same in both cases; catching it needs
+        // the frame's id, which the reducer is not given.
         assertEquals(
             "Rates fell by 30 percent. Rates fell by 30 percent. ",
             whole.liveText["sec_1"],
@@ -334,8 +334,8 @@ class RunReducerTest {
     fun `a frame that repeats the section's current tail is taken for a replay`() {
         // The limitation the reducer states about itself, pinned: a frame
         // whose text is identical to the section's current tail cannot be
-        // told from the frame it repeats. Catching that needs an id on the
-        // frame, which the wire does not carry yet.
+        // told from the frame it repeats. Catching that needs the frame's
+        // id, which the reducer is not given.
         val tail = "percent in every measured quarter of the year. "
 
         val once = RunReducer.reduce(StudioState(), tokenDelta("sec_1", tail))
