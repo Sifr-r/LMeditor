@@ -5581,19 +5581,19 @@ reconnects with its last id`, `a second overflow does not reopen the stream`, `a
 comment block with no data is read past` and `a gap frame names what was
 missed and the stream carries on`.
 
-Six of the new tests were verified to **fail without** their fix and to pass
-with it, because a test that cannot fail proves nothing:
+Several of the new tests were verified to **fail without** their fix and to
+pass with it, because a test that cannot fail proves nothing. The recorded
+mutations, each reverted, each caught by a failing test:
 
-- the overflow test, with the route's overflow handling reverted — the
-  `SubscriberOverrun` escaped the generator;
-- the rotated-past resume, with `max()` replaced by `min()` and with `max()`
-  dropped;
-- the two control-frame tests, with an `id:` line added to a control frame;
-- `a second overflow does not reopen the stream`, which failed before the fix
-  with the unbounded loop's third request;
-- `a comment block with no data is read past`, which failed before the fix
-  with `BackendError.Malformed`.
-
-The two new desktop control-frame tests failed before the fix for the same
-reason: the control frame was decoded as an event.
+- the route's overflow handling reverted — the `SubscriberOverrun` escaped the
+  generator;
+- `max()` replaced by `min()`, and `max()` dropped — the rotated-past resume;
+- an `id:` line added to a control frame — the control-frame assertions;
+- the unbounded reconnect loop — `a second overflow does not reopen the
+  stream`, which failed with the loop's third request;
+- the read-past reverted — `a comment block with no data is read past`, which
+  failed with `BackendError.Malformed`;
+- the client's control-frame handling — the two new desktop control-frame
+  tests, which failed with `BackendError.Malformed` because the control frame
+  was decoded as an event.
 
