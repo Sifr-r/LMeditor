@@ -20,8 +20,10 @@ STATUS_FAILED = "failed"
 STATUS_REJECTED = "rejected"
 
 #: Number of events retained per session so a late or reconnecting subscriber
-#: receives recent history instead of an empty queue. Bounded because the buffer
-#: lives for the whole session; an unbounded log would grow with the run.
+#: receives recent history instead of an empty stream. Bounded because the
+#: buffer lives for the whole session; an unbounded log would grow with the
+#: run. It is also the bound on how far a subscriber may fall behind before
+#: it is disconnected.
 STREAM_REPLAY_BUFFER: int = 512
 
 
@@ -99,20 +101,12 @@ class EventSubscription:
     subscriber and no subscriber's wake-up can be consumed by another.
     """
 
-    def __init__(
-        self,
-        subscription_id: int,
-        position: int,
-        session: WorkflowSession | None = None,
-    ) -> None:
+    def __init__(self, subscription_id: int, position: int) -> None:
         self.subscription_id = subscription_id
         #: The id of the last frame this subscriber has read. The frames it
         #: has not read are those after it.
         self.position = position
         self._wakeup = asyncio.Event()
-        #: The session whose history this subscriber reads. It is a reference
-        #: to the one bounded history, not a copy of it.
-        self._session = session
 
     def wake(self) -> None:
         """Tell the subscriber that something has been published."""
@@ -127,18 +121,6 @@ class EventSubscription:
         """
         await self._wakeup.wait()
         self._wakeup.clear()
-
-    def drain(self) -> list[WorkflowEvent]:
-        """The frames published since this subscriber last read, without waiting.
-
-        A subscriber holds no frames of its own, so the frames it has not
-        read are the ones the session's history still holds. Reading them
-        advances the position exactly as handing them to the subscriber
-        would, so the next read continues where this one stopped.
-        """
-        if self._session is None:
-            return []
-        return self._session.drain(self)
 
 
 class WorkflowSession:
@@ -205,14 +187,21 @@ class WorkflowSession:
     def is_closed(self) -> bool:
         """True once a terminal outcome was recorded for this session.
 
-        Equivalent to "the terminal frame and the close sentinel were
-        delivered": no suspension point separates those two steps.
+        The rule is the session's own terminal flag: the outcome is
+        recorded before the terminal frame is published, so a session that
+        is closed has already published its terminal frame, and no frame
+        will be published after it.
         """
         return self._terminated
 
     @property
     def subscriber_count(self) -> int:
-        """Number of live subscriptions currently receiving fan-out."""
+        """Number of subscriptions currently registered for fan-out.
+
+        A subscription leaves this count when its stream's ``finally``
+        unsubscribes it, which is after the close rather than at it: the
+        close only wakes the subscribers, and each one releases itself.
+        """
         return len(self._subscribers)
 
     async def subscribe(self) -> EventSubscription:
@@ -231,7 +220,6 @@ class WorkflowSession:
         subscription = EventSubscription(
             subscription_id=self._next_subscription_id,
             position=self._oldest_retained_id() - 1,
-            session=self,
         )
         if not self._terminated:
             self._subscribers[subscription.subscription_id] = subscription
@@ -289,6 +277,10 @@ class WorkflowSession:
         it, which is what makes a subscriber that stops reading visible: it
         stops advancing, and the frames it has not read leave the history
         around it.
+
+        The subscription must be one of this session's own: a subscription
+        from another session would be read against the wrong history, and
+        its position silently corrupted.
         """
         while True:
             frame = self._frame_after(subscription.position)
@@ -314,10 +306,16 @@ class WorkflowSession:
         The frames are the ones the session's history still holds, so a
         subscriber that has fallen behind the history is told so rather
         than handed a shortened sequence.
+
+        The subscription must be one of this session's own: a subscription
+        from another session would be read against the wrong history, and
+        its position silently corrupted.
         """
         oldest = self._oldest_retained_id()
         if oldest > subscription.position + 1:
-            raise SubscriberOverrun(subscription.subscription_id, subscription.position, oldest)
+            raise SubscriberOverrun(
+                subscription.subscription_id, subscription.position, oldest
+            )
         drained: list[WorkflowEvent] = []
         while True:
             frame = self._frame_after(subscription.position)
@@ -332,12 +330,22 @@ class WorkflowSession:
         Every stream must observe the close. The single shared sentinel of the
         previous design could be consumed by one subscriber, leaving the others
         blocked on an empty queue for good.
+
+        The map is not cleared here. A subscription is released by its own
+        stream, which unsubscribes in its ``finally``; clearing it here
+        would only hide a stream that has not finished yet. A client that
+        stops reading leaves one registration behind, and nothing else:
+        the frames it has not read live in the session's history, not in it.
         """
         for subscription in tuple(self._subscribers.values()):
             subscription.wake()
 
     async def publish_event(self, event: WorkflowEvent) -> None:
-        """Publish an event to every live subscriber and to the replay buffer.
+        """Record an event in the session's history and wake its subscribers.
+
+        The event is appended once, to the one bounded history, and every
+        subscriber is woken to read it there: no frame is copied for a
+        subscriber that has not asked for it.
 
         All bookkeeping is synchronous and no ``await`` runs between the checks
         and the mutations, and the only owner of this state is the single event

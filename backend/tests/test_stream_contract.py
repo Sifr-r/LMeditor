@@ -456,7 +456,7 @@ def test_approval_resumes_the_real_graph_and_completes(monkeypatch: Any) -> None
         assert session.is_completed is False
         assert session.status == "awaiting_human_review"
         assert doc_id in registered_workflow_threads()
-        before = stream.drain()
+        before = session.drain(stream)
         assert _types(before)[-1] is EventType.HITL_REQUEST
         assert before[-1].data["reason"]
         assert before[-1].data["requires_hitl"] is True
@@ -471,7 +471,7 @@ def test_approval_resumes_the_real_graph_and_completes(monkeypatch: Any) -> None
                 json={"doc_id": doc_id, "approved": True, "feedback": "looks good"},
             )
         await task
-        return approval, session, before, stream.drain()
+        return approval, session, before, session.drain(stream)
 
     try:
         approval, session, before, after = asyncio.run(run())
@@ -522,7 +522,7 @@ def test_rejection_terminates_the_real_graph_without_completion(monkeypatch: Any
         stream = await session.subscribe()
         task = asyncio.create_task(routes._run_workflow_worker(session, _request(doc_id)))
         await _wait_until_pending(session)
-        stream.drain()
+        session.drain(stream)
 
         app = create_app()
         async with _client(app) as client:
@@ -536,7 +536,7 @@ def test_rejection_terminates_the_real_graph_without_completion(monkeypatch: Any
         # The status endpoint agrees: a rejection is not a completion.
         async with _client(app) as client:
             status_response = await client.get(f"/api/v1/workflow/{doc_id}/status")
-        return decision, session, stream.drain(), status_response
+        return decision, session, session.drain(stream), status_response
 
     try:
         _, session, after, status_response = asyncio.run(run())
@@ -587,7 +587,7 @@ def test_workflow_failure_is_terminal_but_not_a_completion(monkeypatch: Any) -> 
         session = await session_manager.create_session(doc_id=doc_id, topic="failure")
         stream = await session.subscribe()
         await routes._run_workflow_worker(session, _request(doc_id))
-        return session, stream.drain()
+        return session, session.drain(stream)
 
     try:
         session, events = asyncio.run(run())
@@ -708,7 +708,7 @@ def test_late_approval_for_resolved_review_is_a_client_error(monkeypatch: Any) -
         stream = await session.subscribe()
         task = asyncio.create_task(routes._run_workflow_worker(session, _request(doc_id)))
         await _wait_until_pending(session)
-        stream.drain()
+        session.drain(stream)
 
         app = create_app()
         async with _client(app) as client:

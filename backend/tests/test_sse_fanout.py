@@ -192,7 +192,7 @@ def test_a_mid_run_subscriber_receives_replayed_history_then_live_frames() -> No
         await session.publish_event(_event(doc_id, EventType.NODE_COMPLETE, WorkflowStep.INGEST))
 
         late = await session.subscribe()
-        replayed = late.drain()
+        replayed = session.drain(late)
         assert _types(replayed) == [EventType.NODE_START, EventType.NODE_COMPLETE]
 
         await session.publish_event(_event(doc_id, EventType.NODE_START, WorkflowStep.DRAFT_SECTIONS))
@@ -229,7 +229,7 @@ def test_the_replay_buffer_is_bounded_to_the_documented_size() -> None:
         assert STREAM_REPLAY_BUFFER == 512
 
         late = await session.subscribe()
-        return late.drain()
+        return session.drain(late)
 
     frames = asyncio.run(run())
 
