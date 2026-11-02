@@ -83,14 +83,48 @@ class SseClientTest {
                 .toByteArray()
         )
         val responses = ArrayDeque(listOf(first, second))
+        var requests = 0
         val http = StubHttpClient {
+            requests += 1
             CompletableFuture.completedFuture(StubResponse(it, 200, responses.removeFirst()))
         }
 
         val events = SseClient(http, "http://example.test").events("doc_1").toList()
 
         assertEquals(listOf("node_start", "workflow_complete"), events.map { it.eventType.wire })
+        assertEquals(2, requests)
         assertEquals("1", http.lastRequest?.headers()?.firstValue("Last-Event-ID")?.orElse(null))
+    }
+
+    @Test
+    fun `a second overflow does not reopen the stream`() = runBlocking {
+        val overflowing = (
+            "id: 1\n" +
+                "event: node_start\n" +
+                "data: {\"event_type\":\"node_start\",\"step\":\"ingest\",\"doc_id\":\"doc_1\",\"data\":{}}\n\n" +
+                "event: overflow\n" +
+                "data: {\"reason\":\"the subscriber fell behind\",\"behind\":3,\"oldest_retained\":2}\n\n"
+            ).toByteArray()
+        // Two overflowing streams, and then an empty one: a client that
+        // reconnects without a bound would open a third request and finish
+        // on the empty one, so the request count is what tells the two
+        // behaviours apart.
+        val responses = ArrayDeque(
+            listOf(ByteArrayInputStream(overflowing), ByteArrayInputStream(overflowing))
+        )
+        var requests = 0
+        val http = StubHttpClient {
+            requests += 1
+            val next = responses.removeFirstOrNull()
+            CompletableFuture.completedFuture(
+                StubResponse(it, 200, next ?: ByteArrayInputStream(ByteArray(0)))
+            )
+        }
+
+        val events = SseClient(http, "http://example.test").events("doc_1").toList()
+
+        assertEquals(listOf("node_start", "node_start"), events.map { it.eventType.wire })
+        assertEquals(2, requests)
     }
 
     @Test

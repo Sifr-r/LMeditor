@@ -15,6 +15,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.channelFlow
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import lmeditor.core.ValidationError
 import lmeditor.core.WorkflowEvent
@@ -65,10 +66,12 @@ class SseClient(
      * in an `overflow` frame before it closes. That is not a failure: the run
      * is still going, so the client reopens the stream with the id of the last
      * frame it received and carries on. It does that once -- a retry loop needs
-     * a backoff and a budget, which is a different decision.
+     * a backoff and a budget, which is a different decision -- so a second
+     * overflow ends the stream, and the caller sees a run that stopped short.
      */
     fun events(docId: String): Flow<WorkflowEvent> = channelFlow {
         var lastEventId: String? = null
+        var reconnected = false
         // The body of the response being read now. A blocked read is not
         // interrupted by cancellation, so cancellation reaches it by closing
         // the body; the holder is how the closing thread finds it.
@@ -82,6 +85,13 @@ class SseClient(
                         val response = http.sendCancellable(request, HttpResponse.BodyHandlers.ofInputStream())
                         val body = response.body()
                         open.set(body)
+                        // A cancellation that lands between the response
+                        // completing and the body being published would
+                        // otherwise leave the body open with nobody to close
+                        // it, and the blocked read below would never end.
+                        if (!isActive) {
+                            body.close()
+                        }
                         body.use { stream ->
                             if (response.statusCode() != 200) {
                                 throw BackendError.Refused(response.statusCode(), "the event stream was refused")
@@ -100,8 +110,10 @@ class SseClient(
                                     }
                                     "gap" -> {
                                         // The server could not give this client the frames it
-                                        // asked for, and named the hole. The authoritative
-                                        // state is fetched separately; the stream continues.
+                                        // asked for, and named the hole. The hole cannot be
+                                        // filled from the stream: the document's state is
+                                        // the authoritative record, and the stream carries
+                                        // on with what comes next.
                                     }
                                     else -> {
                                         frame.id?.let { lastEventId = it }
@@ -117,9 +129,14 @@ class SseClient(
                     } finally {
                         open.set(null)
                     }
-                    if (!overflowed) {
+                    // One reconnect is what this slice covers. A second overflow
+                    // ends the stream: the frames between are gone, and a
+                    // retry loop needs a backoff and a budget, which is a
+                    // different decision.
+                    if (!overflowed || reconnected) {
                         break
                     }
+                    reconnected = true
                 }
                 close()
             } catch (cause: CancellationException) {
@@ -145,7 +162,17 @@ class SseClient(
                 line.startsWith("event:") -> event = line.substring(6).trim()
                 line.startsWith("id:") -> id = line.substring(3).trim()
                 line.startsWith("data:") -> data.add(line.substring(5).removePrefix(" "))
-                line.isEmpty() -> return SseFrame(event, id, data.joinToString("\n"))
+                line.isEmpty() -> {
+                    if (data.isNotEmpty()) {
+                        return SseFrame(event, id, data.joinToString("\n"))
+                    }
+                    // A block with no data is a comment, and the SSE
+                    // specification dispatches nothing for it. It is read
+                    // past rather than turned into an empty frame the caller
+                    // would fail to decode.
+                    event = null
+                    id = null
+                }
             }
         }
     }
