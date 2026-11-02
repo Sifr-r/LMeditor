@@ -1054,18 +1054,25 @@ async def stream_workflow_events(
 ) -> StreamingResponse:
     """Connect to Server-Sent Events stream for a specific document workflow.
 
-    Each frame is ``id: <n>`` plus ``event: <event_type>`` and a ``data:``
-    JSON envelope of ``{event_type, step, doc_id, data}``. The terminal
-    frames are exactly ``workflow_complete`` and ``workflow_error``, after
-    which the stream closes.
+    Each sequence frame is ``id: <n>`` plus ``event: <event_type>`` and a
+    ``data:`` JSON envelope of ``{event_type, step, doc_id, data}``. The
+    terminal frames are exactly ``workflow_complete`` and ``workflow_error``,
+    after which the stream closes.
+
+    The two control frames -- ``gap`` and ``overflow`` -- are not sequence
+    frames: they carry no ``id:``, and their own ``data:`` names what
+    happened rather than reporting an event.
 
     Every request gets its own subscription, so concurrent streams on one
     document each receive the full frame sequence instead of dividing it.
 
     A client that reconnects names the last frame it received in
-    ``Last-Event-ID``, and is given the frames after it. A client that was
-    away longer than the session remembers is told what it missed with a
-    ``gap`` frame, rather than being left to assume it has everything.
+    ``Last-Event-ID``, and is given the frames after it that the session
+    still holds. What the session cannot give is named rather than passed
+    over: a client that was away longer than the session remembers is told
+    what it missed with a ``gap`` frame, and a client that names a frame
+    the session has not published yet is told that too -- it is served that
+    frame once the session reaches it.
 
     A subscriber that falls behind the session's history cannot be given the
     frames it has not read, because they have left it. Its stream ends with

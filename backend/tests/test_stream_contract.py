@@ -22,7 +22,12 @@ from lmeditor.core.types import EntailmentStatus, EventType, WorkflowStep
 from lmeditor.server import routes
 from lmeditor.server.app import create_app
 from lmeditor.server.routes import GenerateDocumentRequest
-from lmeditor.server.session import STATUS_FAILED, WorkflowSession, session_manager
+from lmeditor.server.session import (
+    STATUS_FAILED,
+    STREAM_REPLAY_BUFFER,
+    WorkflowSession,
+    session_manager,
+)
 from lmeditor.server.sources import source_library
 from lmeditor.workflow.graph import (
     registered_workflow_threads,
@@ -37,6 +42,20 @@ SECRET = "INTERNAL-README-SECRET-9f2c1d"
 
 def _client(app: Any) -> httpx.AsyncClient:
     return async_client(app)
+
+
+def _frame_fields(frame: str) -> dict[str, str]:
+    """The fields of an SSE frame, read by name rather than by position.
+
+    A frame's fields are read by name so that a frame can carry another
+    field -- the frame id -- without every reader of a frame having to
+    know where it sits.
+    """
+    fields: dict[str, str] = {}
+    for line in frame.split("\n"):
+        key, _, value = line.partition(":")
+        fields[key] = value.strip()
+    return fields
 
 
 #: Upper bound on a full SSE read. The stream endpoint is a generator that only
@@ -307,10 +326,7 @@ def test_stream_frames_carry_canonical_envelope() -> None:
 
         names: list[str] = []
         for frame in frames:
-            fields: dict[str, str] = {}
-            for line in frame.split("\n"):
-                key, _, value = line.partition(":")
-                fields[key] = value.strip()
+            fields = _frame_fields(frame)
             assert fields["id"].isdigit()
             assert "event" in fields
             assert "data" in fields
@@ -422,15 +438,15 @@ def test_a_reconnect_with_the_last_event_id_is_served_exactly_the_frames_after_i
 
 
 def test_a_reconnect_the_session_can_no_longer_serve_is_told_the_gap() -> None:
-    """A resume the history cannot serve completely says so.
+    """A resume the session cannot serve completely says so.
 
-    The client asked for the frames after a frame the session no longer
-    remembers. It is given what the session still has, and told exactly
-    which frames it will not be given.
+    The client names a frame the session never published, so the session
+    has none of the frames it asked for to give it. It says so with a gap
+    frame rather than leaving the client to assume it has everything.
     """
     doc_id = "doc_resume_gap"
 
-    async def run() -> httpx.Response:
+    async def run() -> tuple[httpx.Response, WorkflowSession]:
         session = await session_manager.create_session(doc_id=doc_id, topic="resume")
         await session.publish_event(
             WorkflowEvent(
@@ -444,25 +460,143 @@ def test_a_reconnect_the_session_can_no_longer_serve_is_told_the_gap() -> None:
 
         app = create_app()
         async with _client(app) as client:
-            return await asyncio.wait_for(
+            response = await asyncio.wait_for(
                 client.get(
                     f"/api/v1/stream/{doc_id}",
                     headers={"Last-Event-ID": "999"},
                 ),
                 timeout=STREAM_READ_TIMEOUT,
             )
+        return response, session
+
+    try:
+        response, session = asyncio.run(run())
+
+        assert response.status_code == 200
+        assert "event: gap" in response.text
+        frames = [frame for frame in response.text.split("\n\n") if frame.strip()]
+        gap_frame = _frame_fields(frames[0])
+        assert gap_frame["event"] == "gap"
+        # A control frame carries no id: a client's last-event-id buffer
+        # advances only on a frame that has one, so the client stays able to
+        # resume from the last sequence frame it received.
+        assert "id" not in gap_frame
+        gap = json.loads(gap_frame["data"])
+        assert gap["requested_after"] == 999
+        # The resume could not be served completely, and the session counted it.
+        assert session.gaps_served == 1
+    finally:
+        # The registry is process-wide: the session this test opened is taken
+        # out of it again, whether the body succeeded or not.
+        asyncio.run(session_manager.remove_session(doc_id))
+
+
+def test_a_reconnect_with_an_id_the_session_has_rotated_past_is_served_what_is_left() -> None:
+    """A client that was away too long is told the hole and given what is left.
+
+    The session remembers a bounded window of frames, so a client that was
+    away longer than that window names an id that has rotated out of the
+    history. It is served the frames the session still holds, preceded by
+    the gap frame that names the frames it will never be given.
+    """
+    doc_id = "doc_resume_rotated_past"
+
+    async def run() -> tuple[httpx.Response, WorkflowSession]:
+        session = await session_manager.create_session(doc_id=doc_id, topic="resume")
+        for index in range(STREAM_REPLAY_BUFFER + 1):
+            await session.publish_event(
+                WorkflowEvent(
+                    event_type=EventType.NODE_COMPLETE,
+                    step=WorkflowStep.DRAFT_SECTIONS,
+                    doc_id=doc_id,
+                    data={"step": "draft_sections", "index": index},
+                )
+            )
+        await session.complete(sections=[{"section_id": "sec_1", "title": "Intro"}])
+
+        app = create_app()
+        async with _client(app) as client:
+            response = await asyncio.wait_for(
+                client.get(
+                    f"/api/v1/stream/{doc_id}",
+                    headers={"Last-Event-ID": "1"},
+                ),
+                timeout=STREAM_READ_TIMEOUT,
+            )
+        return response, session
+
+    try:
+        response, session = asyncio.run(run())
+
+        assert response.status_code == 200
+        frames = [frame for frame in response.text.split("\n\n") if frame.strip()]
+
+        # The gap frame comes first: the client is told the hole before it is
+        # given the frames that follow it.
+        gap_frame = _frame_fields(frames[0])
+        assert gap_frame["event"] == "gap"
+        assert "id" not in gap_frame
+        gap = json.loads(gap_frame["data"])
+        assert gap["requested_after"] == 1
+        # The hole is exactly the frames that have left the history.
+        assert gap["oldest_retained"] == 3
+
+        sequence = [_frame_fields(frame) for frame in frames[1:]]
+        # The frames that follow the gap are the retained sequence frames,
+        # not another control frame: a stream that could not serve them
+        # would say so with one.
+        assert all("id" in fields for fields in sequence), (
+            "the retained frames were not served after the gap"
+        )
+        ids = [int(fields["id"]) for fields in sequence]
+        # The frames the session still holds, in order, and no frame twice.
+        assert ids == list(range(3, STREAM_REPLAY_BUFFER + 3))
+        assert ids == sorted(set(ids))
+        assert session.gaps_served == 1
+    finally:
+        # The registry is process-wide: the session this test opened is taken
+        # out of it again, whether the body succeeded or not.
+        asyncio.run(session_manager.remove_session(doc_id))
+
+
+def test_the_ids_of_one_stream_go_up_and_never_repeat() -> None:
+    """The ids of a stream are a sequence: they rise, and no id is used twice.
+
+    A client resumes from the last id it saw, so an id that went backwards
+    would make it ask for frames it already has and a repeated id would make
+    it skip a frame it never received.
+    """
+    doc_id = "doc_resume_ids"
+
+    async def run() -> httpx.Response:
+        session = await session_manager.create_session(doc_id=doc_id, topic="resume")
+        for index in range(5):
+            await session.publish_event(
+                WorkflowEvent(
+                    event_type=EventType.NODE_COMPLETE,
+                    step=WorkflowStep.DRAFT_SECTIONS,
+                    doc_id=doc_id,
+                    data={"step": "draft_sections", "index": index},
+                )
+            )
+        await session.complete(sections=[{"section_id": "sec_1", "title": "Intro"}])
+
+        app = create_app()
+        async with _client(app) as client:
+            return await asyncio.wait_for(
+                client.get(f"/api/v1/stream/{doc_id}"), timeout=STREAM_READ_TIMEOUT
+            )
 
     try:
         response = asyncio.run(run())
 
         assert response.status_code == 200
-        assert "event: gap" in response.text
-        gap = json.loads(
-            [line for line in response.text.splitlines() if line.startswith("data: ")][0][
-                len("data: ") :
-            ]
-        )
-        assert gap["requested_after"] == 999
+        frames = [frame for frame in response.text.split("\n\n") if frame.strip()]
+        ids = [int(_frame_fields(frame)["id"]) for frame in frames]
+        assert ids == list(range(1, 7))
+        # Strictly increasing, and no id twice.
+        assert ids == sorted(set(ids))
+        assert len(ids) == len(set(ids))
     finally:
         # The registry is process-wide: the session this test opened is taken
         # out of it again, whether the body succeeded or not.

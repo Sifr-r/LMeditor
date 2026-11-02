@@ -76,18 +76,30 @@ def _event(doc_id: str, event_type: EventType, step: WorkflowStep, **data: Any) 
     return WorkflowEvent(event_type=event_type, step=step, doc_id=doc_id, data=data)
 
 
-def _field(frame: str, name: str) -> str:
-    """One field of an SSE frame, read by name rather than by position.
+def _fields(frame: str) -> dict[str, str]:
+    """The fields of an SSE frame, read by name rather than by position.
 
     A frame's fields are read by name so that a frame can carry another
     field -- the frame id -- without every reader of a frame having to
     know where it sits.
     """
+    fields: dict[str, str] = {}
     for line in frame.split("\n"):
         key, _, value = line.partition(":")
-        if key == name:
-            return value.strip()
-    raise AssertionError(f"the frame carries no {name!r} field: {frame!r}")
+        fields[key] = value.strip()
+    return fields
+
+
+def _field(frame: str, name: str) -> str:
+    """One field of an SSE frame, read by name.
+
+    A frame that does not carry the field is a failure of the frame, and
+    the reader says so rather than working around it.
+    """
+    fields = _fields(frame)
+    if name not in fields:
+        raise AssertionError(f"the frame carries no {name!r} field: {frame!r}")
+    return fields[name]
 
 
 def _types(frames: list[WorkflowEvent]) -> list[EventType]:
@@ -487,6 +499,11 @@ def test_a_subscriber_that_fell_behind_is_told_and_disconnected() -> None:
     frames, received, before_attach, session = asyncio.run(run())
 
     assert any("event: overflow" in frame for frame in frames)
+    overflow = next(frame for frame in frames if "event: overflow" in frame)
+    # A control frame carries no id: a client's last-event-id buffer
+    # advances only on a frame that has one, so the client stays able to
+    # resume from the last sequence frame it received.
+    assert "id" not in _fields(overflow)
     assert session.overflowed_subscribers == 1
     # The overflowed subscription is released: the subscriber count is back
     # to what it was before that stream attached.

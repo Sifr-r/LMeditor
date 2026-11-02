@@ -224,10 +224,12 @@ class WorkflowSession:
         names none starts at the oldest frame the session still holds, so
         it is given the recent history and the live frames that follow.
 
-        A subscriber that names a frame the session no longer holds starts
+        A subscriber that names a frame the session has rotated past starts
         at the oldest frame it does hold: the frames it missed have left
         the history, and :meth:`gap_before` names the hole rather than the
-        stream quietly serving a shortened sequence.
+        stream quietly serving a shortened sequence. A subscriber that
+        names a frame the session has not published yet waits for it: the
+        stream is served that frame once the session reaches it.
 
         A subscription on an already-closed session comes back **already
         terminated**: the history ends with the terminal frame and there is
@@ -251,13 +253,21 @@ class WorkflowSession:
     def gap_before(self, last_event_id: int) -> dict[str, int] | None:
         """What a resume could not be given, if anything.
 
-        The session remembers the last ``STREAM_REPLAY_BUFFER`` frames. A
-        client that was away longer than that is owed frames the session
-        no longer has, and the hole is named rather than papered over.
+        The session serves the frames a resuming client asked for that the
+        history still holds, and names what it cannot give rather than
+        letting the client assume it has everything.
 
-        A client that names a frame the session never published is owed it
-        too, and is named in the same way: the server serves what it
-        remembers and says what it does not have.
+        A client that was away longer than the session remembers is owed
+        frames the session no longer has: they have left the history, and
+        the hole is named. A client that names a frame the session has not
+        published yet is named as well, but nothing is missed there: the
+        session serves it that frame once the session reaches it, and until
+        then the stream waits for it.
+
+        The payload names the id the client asked to resume after and the
+        oldest frame the session still holds. In the ahead-of-session case
+        those two numbers do not describe a hole, because nothing is
+        missed.
         """
         oldest = self._oldest_retained_id()
         latest = self._latest_event_id
