@@ -128,6 +128,25 @@ class SseClientTest {
     }
 
     @Test
+    fun `a comment block with no data is read past`() = runBlocking {
+        val input = ByteArrayInputStream(
+            (": heartbeat\n" +
+                "\n" +
+                "id: 7\n" +
+                "event: node_start\n" +
+                "data: {\"event_type\":\"node_start\",\"step\":\"ingest\",\"doc_id\":\"doc_1\",\"data\":{}}\n\n")
+                .toByteArray()
+        )
+        val http = StubHttpClient {
+            CompletableFuture.completedFuture(StubResponse(it, 200, input))
+        }
+
+        val events = SseClient(http, "http://example.test").events("doc_1").toList()
+
+        assertEquals(listOf("node_start"), events.map { it.eventType.wire })
+    }
+
+    @Test
     fun `a gap frame names what was missed and the stream carries on`() = runBlocking {
         val input = ByteArrayInputStream(
             ("event: gap\n" +

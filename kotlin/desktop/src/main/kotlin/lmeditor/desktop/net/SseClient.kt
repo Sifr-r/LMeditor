@@ -89,8 +89,12 @@ class SseClient(
                         // completing and the body being published would
                         // otherwise leave the body open with nobody to close
                         // it, and the blocked read below would never end.
+                        // The worker stops here rather than reading a closed
+                        // stream and reporting the result as an unreachable
+                        // backend, which is not what happened.
                         if (!isActive) {
                             body.close()
+                            return@launch
                         }
                         body.use { stream ->
                             if (response.statusCode() != 200) {
