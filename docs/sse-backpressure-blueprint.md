@@ -196,7 +196,7 @@ that already exists:
 |---|---|
 | `overflowed_subscribers` | Subscribers disconnected for falling behind |
 | `frames_withheld` | Frames a subscriber was never given because it fell behind |
-| `gaps_served` | Resumes that could not be served completely |
+| `gaps_served` | Resumes that were answered with a gap frame |
 
 The house rule is that a skip is not a pass and a dropped frame is not a
 quiet frame. A subscriber that vanished because it was slow is exactly the

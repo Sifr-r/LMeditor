@@ -220,6 +220,6 @@ The SSE slice was verified the same way: **1,081 Kotlin tests**, **1,725
 selected backend tests**, strict typing over **135 source files** for both
 platforms, **26** parity comparisons and the live HTTP document round trip,
 with no executed failures or skips. The evidence is under
-`build/release/run-jpm08wa3`, with the full suite's own log kept beside it as
+`build/release/run-918zj_yh`, with the full suite's own log kept beside it as
 `pytest-full-suite.log`; the full local suite outside the portable scope is
 **1,749 passed, 0 failed**.

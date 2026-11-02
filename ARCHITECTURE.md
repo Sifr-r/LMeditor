@@ -5437,7 +5437,8 @@ behaviour the old client did not have.
 dropped by a caller that does not handle them. `StudioController` puts both
 notices in `StudioState.notice`, the channel the desktop already uses for
 "something happened the operator should know", and not in `StudioState.error`,
-because the run continued.
+because the run continued. The screens show a notice only when there is no
+error — see §33.8.
 
 The gap notice distinguishes the two cases the payload describes. When the
 frames really are gone it names them; when the client resumed **ahead** of
@@ -5551,8 +5552,22 @@ route calls at the one place a gap is served.
 `test_approval_resumes_the_real_graph_and_completes` waited two seconds for a
 worker that loads model weights — 26.9 seconds on a cold start, against
 8.1 seconds warm. It was flaky before this slice and would have made the
-hosted gate flaky with it, so the budget was raised to half a minute and the
-reason recorded in the test.
+hosted gate flaky with it, so the budget was raised to a **minute**, and the
+reason recorded in the test. The budget is a deadline rather than a count of
+looks, because a sleep lasts the platform's timer granularity and not the
+interval asked for: on Windows a 5 ms sleep takes about 14 ms, so a count of
+looks would have bought a different amount of time on each platform.
+
+The fix round was then re-reviewed, and the re-review returned **PASS**: all
+six findings closed, with no Critical or Important finding and no false
+statement in the changed documents. It re-derived the M1, M7 and M8 mutation
+outcomes for itself rather than taking the fix round's word for them,
+produced blueprint §5's example payload byte-for-byte from the committed
+code, and measured the sleep granularity that the budget above accounts for.
+Its five Minors were a pre-existing UI masking, the single-notice limit
+already recorded below, the budget's stated size, a counter that counted more
+than the blueprint said, and a comment whose premise the code had made
+unreachable. All five are addressed above or below.
 
 ### 33.8 What it proves, and what it does not
 
@@ -5597,6 +5612,16 @@ What it does **not** prove:
   `frames_withheld` counters record both — but the operator sees one notice,
   not a history of them. A second field would fix it, and the slice did not
   add one.
+- **The screens show a notice only when there is no error.** The desktop
+  renders `error` and `notice` in a `when` that lets one of them through, in
+  all three screens that show a run. A notice set while an error is present
+  therefore waits behind the error until the operator dismisses it. This is
+  the app's existing behaviour, in files the slice did not touch, and the run
+  no longer ends looking successful — the error says it did not. But the fact
+  the notice carries, how many frames were withheld, is not on the screen at
+  the same time as the error. **The server's three counters are not exposed
+  by any route**, so the notice is the operator's only channel, which is what
+  makes the two limits above worth naming.
 - **`StudioController`'s *"the event stream ended before the run completed"*
   branch and `HttpTransport`'s `onCancellation` handler are outside this
   slice's files, and are not covered by a test in the desktop module.**
@@ -5632,7 +5657,7 @@ The local portable gate passes on this tree, and its evidence is kept under
 | Kotlin parity | 26 agreed, 0 disagreed, 0 skipped |
 | Live HTTP round trip | every check passed |
 
-The evidence for this run is `build/release/run-jpm08wa3`. The five portable
+The evidence for this run is `build/release/run-918zj_yh`. The five portable
 deselections and the three excluded Word modules are recorded beside it in
 `external-checks.json`, and the full suite's own log is kept beside them as
 `pytest-full-suite.log`, because the gate itself runs only the portable scope.

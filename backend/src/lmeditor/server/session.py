@@ -198,9 +198,10 @@ class WorkflowSession:
         #: frames were published to the session's history; they were
         #: withheld from that one subscriber.
         self.frames_withheld: int = 0
-        #: Resumes that could not be served completely: a client asked for
-        #: frames the session does not have, and was told so rather than
-        #: being left to assume it has everything.
+        #: Resumes that were answered with a gap frame: a client asked for
+        #: frames the session does not have, or named a frame the session has
+        #: not published yet, and was told so rather than being left to
+        #: assume it has everything.
         self.gaps_served: int = 0
 
     # ------------------------------------------------------------------
@@ -295,7 +296,7 @@ class WorkflowSession:
         return {"requested_after": last_event_id, "oldest_retained": oldest}
 
     def note_gap_served(self) -> None:
-        """Count one resume that could not be served completely.
+        """Count one resume that was answered with a gap frame.
 
         The count belongs to the serving, not to the asking: a caller that
         asks whether a gap exists has not served one. The route calls this
