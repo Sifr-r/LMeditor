@@ -1447,6 +1447,9 @@ reaches the read by closing the body: `awaitClose` holds the body in an
 own liveness is checked as soon as it publishes the body, so a cancellation
 that arrives in the moment before the body is published closes it too.
 
+The liveness check needs `import kotlinx.coroutines.isActive` alongside the
+coroutines imports the file already has.
+
 Add the request builder next to it:
 
 ```kotlin
