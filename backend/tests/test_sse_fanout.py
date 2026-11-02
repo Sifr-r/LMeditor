@@ -14,8 +14,8 @@ Everything here is offline. No stream is proven over live HTTP: httpx's
 concurrently open SSE responses, and a real network fetch is out of scope. The
 delivery defect lives in the session's fan-out, so that is where the fan-out is
 proven, and the routes are proven through the functions FastAPI calls. Every
-wait that could hang on a lost sentinel is bounded, so a regression fails a test
-instead of stalling the suite.
+wait that could hang on a stream that never ends is bounded, so a regression
+fails a test instead of stalling the suite.
 """
 
 from __future__ import annotations
@@ -47,7 +47,8 @@ from lmeditor.server.session import (
 )
 from tests.http_support import async_client
 
-#: Upper bound for every wait that a lost sentinel could turn into a hang.
+#: Upper bound for every wait that a stream that never ends could turn into
+#: a hang.
 WAIT_TIMEOUT: float = 5.0
 
 #: Bound on a deliberately blocking seam, so a test that *should* have stayed
@@ -152,7 +153,7 @@ def test_two_concurrent_subscribers_each_receive_the_complete_sequence() -> None
 
 
 def test_a_subscriber_that_joins_a_closed_session_is_terminated_at_once() -> None:
-    """A stream opened after completion must not wait on a dead queue.
+    """A stream opened after completion must not wait for a frame nobody publishes.
 
     Bounded by :data:`WAIT_TIMEOUT`: the old design consumed the single
     sentinel for the first stream, so this subscribe blocked on an empty queue
@@ -179,7 +180,7 @@ def test_a_subscriber_that_joins_a_closed_session_is_terminated_at_once() -> Non
 
 
 def test_a_mid_run_subscriber_receives_replayed_history_then_live_frames() -> None:
-    """Bounded replay: a late subscriber sees recent history, not an empty queue.
+    """Bounded replay: a late subscriber sees recent history, not an empty stream.
 
     History is delivered exactly once — as replay — and live frames continue on
     the same subscription without repeating or reordering the replayed ones.
@@ -366,7 +367,7 @@ def test_failure_and_rejection_deliver_one_terminal_frame_and_no_completion() ->
 
 
 def test_a_terminal_transition_is_idempotent_for_every_subscriber() -> None:
-    """A second terminal transition adds no frame and no second sentinel."""
+    """A second terminal transition adds no frame and no second close."""
     doc_id = "doc_fanout_idempotent"
 
     async def run() -> list[WorkflowEvent]:
@@ -384,7 +385,7 @@ def test_a_terminal_transition_is_idempotent_for_every_subscriber() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Finding 13: a dropped client must not keep a queue alive
+# Finding 13: a subscriber is a position, not a queue
 # ---------------------------------------------------------------------------
 
 
@@ -414,13 +415,29 @@ def test_a_subscriber_that_fell_behind_is_told_and_disconnected() -> None:
     """A subscriber that stops reading is disconnected, and told why.
 
     The frames it has not read have left the session's history, so it can
-    never be given them. It is ended with an overflow frame saying so, and
-    the other subscribers are untouched.
+    never be given them. It is ended with an overflow frame saying so, the
+    subscriber that kept reading is given every frame, and the overflowed
+    subscription is released.
     """
     doc_id = "doc_fanout_overrun"
 
-    async def run() -> tuple[list[str], WorkflowSession]:
+    async def run() -> tuple[list[str], list[int], int, WorkflowSession]:
         session = await session_manager.create_session(doc_id=doc_id, topic="fanout")
+
+        # A second subscriber keeps reading every frame the session publishes.
+        keeper = await session.subscribe()
+        received: list[int] = []
+
+        async def keep_up() -> None:
+            while True:
+                frame = await session.next_frame(keeper)
+                if frame is None:
+                    return
+                received.append(frame[0])
+
+        reading = asyncio.create_task(keep_up())
+        before_attach = session.subscriber_count
+
         response = await routes.stream_workflow_events(doc_id)
         body = cast(AsyncGenerator[str, None], response.body_iterator)
 
@@ -434,6 +451,9 @@ def test_a_subscriber_that_fell_behind_is_told_and_disconnected() -> None:
             await session.publish_event(
                 _event(doc_id, EventType.NODE_COMPLETE, WorkflowStep.DRAFT_SECTIONS)
             )
+            # The subscriber that keeps up is given the chance to read each
+            # frame, so that it stays level with the publisher.
+            await asyncio.sleep(0)
 
         rest = []
         while True:
@@ -444,12 +464,24 @@ def test_a_subscriber_that_fell_behind_is_told_and_disconnected() -> None:
             except StopAsyncIteration:
                 break
         await body.aclose()
-        return [first, *rest], session
 
-    frames, session = asyncio.run(run())
+        # The session ends, so the subscriber that kept up finishes with it.
+        await session.complete()
+        await asyncio.wait_for(reading, timeout=WAIT_TIMEOUT)
+        return [first, *rest], received, before_attach, session
+
+    frames, received, before_attach, session = asyncio.run(run())
 
     assert any("event: overflow" in frame for frame in frames)
     assert session.overflowed_subscribers == 1
+    # The overflowed subscription is released: the subscriber count is back
+    # to what it was before that stream attached.
+    assert session.subscriber_count == before_attach
+    # The publisher neither blocked nor dropped anything for the subscriber
+    # that kept reading: it was given every frame, in order -- the first
+    # frame, the STREAM_REPLAY_BUFFER + 2 that pushed the stalled subscriber
+    # out of the history, and the terminal frame.
+    assert received == list(range(1, STREAM_REPLAY_BUFFER + 5))
 
 
 def test_a_dropped_stream_unsubscribes_and_stops_accumulating() -> None:
@@ -475,8 +507,9 @@ def test_a_dropped_stream_unsubscribes_and_stops_accumulating() -> None:
         await body.aclose()
         assert session.subscriber_count == 0
 
-        # Frames published after the disconnect are not queued for that client,
-        # and a stream that attaches now is closed by the terminal sentinel.
+        # The subscription is gone, so the frames published after the disconnect
+        # are not held for that client, and a stream that attaches now is
+        # closed by the session's terminal frame.
         await session.complete(sections=[{"section_id": "sec_1", "title": "Intro"}])
         return first_frame, session
 
@@ -490,9 +523,9 @@ def test_a_dropped_stream_unsubscribes_and_stops_accumulating() -> None:
 def test_a_reconnecting_stream_replays_the_session_history_over_http() -> None:
     """A stream opened after completion is closed by the session, not by luck.
 
-    The whole scenario is bounded: an HTTP stream that never receives its
-    sentinel leaves the request suspended forever rather than failing, because
-    the loop stays responsive while the generator waits on the subscription.
+    The whole scenario is bounded: an HTTP stream that never ends leaves the
+    request suspended forever rather than failing, because the loop stays
+    responsive while the generator waits on the subscription.
     """
     doc_id = "doc_fanout_reconnect"
 

@@ -1051,10 +1051,10 @@ def _kind_from_extension(path: Path) -> SourceKind:
 async def stream_workflow_events(doc_id: str) -> StreamingResponse:
     """Connect to Server-Sent Events stream for a specific document workflow.
 
-    Each frame is ``event: <event_type>`` plus a ``data:`` JSON envelope of
-    ``{event_type, step, doc_id, data}``. The terminal frames are exactly
-    ``workflow_complete`` and ``workflow_error``; the stream ends once the
-    subscriber has read the terminal frame.
+    Each sequence frame is ``event: <event_type>`` plus a ``data:`` JSON
+    envelope of ``{event_type, step, doc_id, data}``. The terminal frames are
+    exactly ``workflow_complete`` and ``workflow_error``; the stream ends once
+    the subscriber has read the terminal frame.
 
     A subscriber that falls behind the session's history cannot be given the
     frames it has not read, because they have left it. Its stream ends with

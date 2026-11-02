@@ -195,10 +195,10 @@ class WorkflowSession:
     def is_closed(self) -> bool:
         """True once a terminal outcome was recorded for this session.
 
-        The rule is the session's own terminal flag: the outcome is
-        recorded before the terminal frame is published, so a session that
-        is closed has already published its terminal frame, and no frame
-        will be published after it.
+        The rule is the session's own terminal flag: the three terminal
+        transitions set it, and no suspension point separates setting it
+        from publishing the terminal frame, so a session that is closed has
+        already published its terminal frame and none will follow it.
         """
         return self._terminated
 
@@ -273,6 +273,24 @@ class WorkflowSession:
             return None
         return self._history[index]
 
+    def _raise_if_behind(self, subscription: EventSubscription) -> None:
+        """Raise and count if the subscriber has fallen behind the history.
+
+        The rule is the same wherever it is noticed: a subscriber that has
+        fallen behind has been denied the frames it has not read, because
+        they have left the history and cannot be given to it. The denial is
+        counted wherever it is noticed, so that the two reads cannot
+        disagree about whether a subscriber was owed frames it did not get.
+        """
+        oldest = self._oldest_retained_id()
+        if oldest > subscription.position + 1:
+            overrun = SubscriberOverrun(
+                subscription.subscription_id, subscription.position, oldest
+            )
+            self.overflowed_subscribers += 1
+            self.frames_withheld += overrun.frames_missed
+            raise overrun
+
     async def next_frame(
         self, subscription: EventSubscription
     ) -> tuple[int, WorkflowEvent] | None:
@@ -298,15 +316,7 @@ class WorkflowSession:
             # The frame the subscriber is owed is not in the history. Either
             # the session has not published it yet, or the history has
             # rotated past it and the subscriber has missed frames.
-            if self._oldest_retained_id() > subscription.position + 1:
-                overrun = SubscriberOverrun(
-                    subscription.subscription_id,
-                    subscription.position,
-                    self._oldest_retained_id(),
-                )
-                self.overflowed_subscribers += 1
-                self.frames_withheld += overrun.frames_missed
-                raise overrun
+            self._raise_if_behind(subscription)
             if self._terminated:
                 return None
             await subscription.wait()
@@ -322,11 +332,7 @@ class WorkflowSession:
         from another session would be read against the wrong history, and
         its position silently corrupted.
         """
-        oldest = self._oldest_retained_id()
-        if oldest > subscription.position + 1:
-            raise SubscriberOverrun(
-                subscription.subscription_id, subscription.position, oldest
-            )
+        self._raise_if_behind(subscription)
         drained: list[WorkflowEvent] = []
         while True:
             frame = self._frame_after(subscription.position)
