@@ -15,6 +15,7 @@ from typing import Any
 
 import httpx
 import pytest
+from fastapi import HTTPException
 
 from lmeditor.core.exceptions import InvalidStateTransitionError
 from lmeditor.core.schemas import Claim, SectionDraft, SectionStatus, SourceChunk, WorkflowEvent
@@ -628,6 +629,56 @@ def test_a_last_event_id_that_is_not_a_frame_id_is_refused() -> None:
         response = asyncio.run(run())
 
         assert response.status_code == 400
+    finally:
+        # The registry is process-wide: the session this test opened is taken
+        # out of it again, whether the body succeeded or not.
+        asyncio.run(session_manager.remove_session(doc_id))
+
+
+def test_a_last_event_id_that_is_not_a_frame_id_in_any_other_spelling_is_refused() -> None:
+    """Only ASCII decimal digits from 1 name a frame.
+
+    A frame id is the session's own sequence number, so it is written in
+    ASCII decimal digits and counts from 1. ``int()`` on its own would read
+    "5_0" as 50 and would accept a negative id that no frame ever carried,
+    so the header is checked as the digits it must be rather than parsed and
+    hoped for.
+
+    The non-ASCII spelling cannot travel over HTTP -- a header value is
+    ASCII on the wire -- so it is refused at the route itself.
+    """
+    doc_id = "doc_resume_bad_header_forms"
+
+    async def run() -> list[httpx.Response]:
+        session = await session_manager.create_session(doc_id=doc_id, topic="resume")
+        await session.complete(sections=[{"section_id": "sec_1", "title": "Intro"}])
+        app = create_app()
+        responses: list[httpx.Response] = []
+        async with _client(app) as client:
+            for value in ("5_0", "0", "-1", " 1", "1.0", ""):
+                responses.append(
+                    await asyncio.wait_for(
+                        client.get(
+                            f"/api/v1/stream/{doc_id}",
+                            headers={"Last-Event-ID": value},
+                        ),
+                        timeout=STREAM_READ_TIMEOUT,
+                    )
+                )
+        return responses
+
+    try:
+        responses = asyncio.run(run())
+
+        assert [response.status_code for response in responses] == [400] * 6
+        assert all(
+            response.json()["detail"] == "Last-Event-ID is not a frame id."
+            for response in responses
+        )
+
+        with pytest.raises(HTTPException) as caught:
+            asyncio.run(routes.stream_workflow_events(doc_id, "١٢"))
+        assert caught.value.status_code == 400
     finally:
         # The registry is process-wide: the session this test opened is taken
         # out of it again, whether the body succeeded or not.

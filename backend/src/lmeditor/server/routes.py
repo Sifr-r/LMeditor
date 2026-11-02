@@ -1043,6 +1043,19 @@ def _kind_from_extension(path: Path) -> SourceKind:
     return SourceKind.TEXT
 
 
+def _frame_id(value: str) -> int:
+    """The frame id the client named, or a ``ValueError`` if it names none.
+
+    A frame id is the session's own sequence number: ASCII decimal digits
+    counting from 1. ``int()`` on its own would read "5_0" as 50 and an
+    Arabic-Indic "١٢" as 12, and would accept a negative id that no frame
+    ever carried.
+    """
+    if not value.isascii() or not value.isdigit() or not value.strip("0"):
+        raise ValueError("not a frame id")
+    return int(value)
+
+
 @router.get(
     "/stream/{doc_id}",
     response_class=StreamingResponse,
@@ -1089,7 +1102,7 @@ async def stream_workflow_events(
     resume_from: int | None = None
     if last_event_id is not None:
         try:
-            resume_from = int(last_event_id)
+            resume_from = _frame_id(last_event_id)
         except ValueError as exc:
             # A header that is not a frame id is refused rather than ignored:
             # serving the wrong frames to a client that believes it has
