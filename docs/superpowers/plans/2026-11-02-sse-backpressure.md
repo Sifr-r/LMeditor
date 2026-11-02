@@ -347,6 +347,64 @@ Frames carry an id from the session's counter, so a subscriber's position
 is a frame id and a reconnect can name it."
 ```
 
+### Corrections to Task 1
+
+Added after the pre-flight review of this plan against the tree it runs
+against, and after the human partner ruled on the conflict it found.
+
+**Finding.** Task 1 replaces `EventSubscription` and removes `get()` and
+`drain()`. Four call sites in `backend/tests/test_sse_fanout.py` use them:
+`_collect` (L82-89), `_collect_bounded` (L92-99),
+`test_a_mid_run_subscriber_receives_replayed_history_then_live_frames`
+(L189, L194) and `test_the_replay_buffer_is_bounded_to_the_documented_size`
+(L226). This plan named the file but no step adapted them, and Task 1's
+Step 9 note pointed the implementer at the wrong thing.
+
+**Ruling.** The read mechanism changes to `session.next_frame(subscription)`.
+Every existing assertion is preserved unchanged. No test is weakened,
+skipped or deleted.
+
+`_collect` takes the session as well as the subscription:
+
+```python
+async def _collect(
+    session: WorkflowSession, subscription: EventSubscription
+) -> list[WorkflowEvent]:
+    """Read frames until the stream ends. Bound by the caller."""
+    frames: list[WorkflowEvent] = []
+    while True:
+        frame = await session.next_frame(subscription)
+        if frame is None:
+            return frames
+        frames.append(frame[1])
+```
+
+and `_collect_bounded` becomes:
+
+```python
+async def _collect_bounded(
+    session: WorkflowSession, subscription: EventSubscription
+) -> list[WorkflowEvent]:
+    """``_collect`` under a timeout: a stream that never ends fails the test.
+
+    Under the old shared-queue design only one of several subscribers ever
+    received the sentinel, so this is where such a regression surfaces as a
+    ``TimeoutError`` instead of a hung suite.
+    """
+    return await asyncio.wait_for(
+        _collect(session, subscription), timeout=WAIT_TIMEOUT
+    )
+```
+
+`late.drain()` is replaced by reading through the cursor. A subscriber's
+position advances only when a frame is handed to it, so the replayed history
+and the live frames that follow come out of one `next_frame` sequence with no
+duplication — which is exactly what the existing assertions expect. The
+`replayed + await _collect_bounded(late)` shape becomes a single
+`_collect_bounded(session, late)`, and
+`test_the_replay_buffer_is_bounded_to_the_documented_size` reads its frames
+the same way.
+
 ---
 
 ### Task 2: The overflow
@@ -853,6 +911,102 @@ frame id is refused with 400, because serving the wrong frames to a
 client that believes it has resumed is worse than refusing it."
 ```
 
+### Corrections to Task 3
+
+Added after the pre-flight review of this plan against the tree it runs
+against, and after the human partner ruled on the conflict it found.
+
+**Finding 1.** The plan's `gap_before` emits a gap only when the client's next
+wanted frame has rotated *out* of the retained window, which is what blueprint
+§5/§6 say. The plan's own gap test asks for `Last-Event-ID: 999` on a session
+whose newest frame is id 2 — a frame the session never published — which that
+condition does not catch, so the test fails against the implementation it
+tests.
+
+**Ruling 1.** One rule: the server serves what it remembers and names what it
+does not. A request the session never had is named as a gap too.
+
+```python
+    def gap_before(self, last_event_id: int) -> dict[str, int] | None:
+        """What a resume could not be given, if anything.
+
+        The session remembers the last ``STREAM_REPLAY_BUFFER`` frames. A
+        client that was away longer than that is owed frames the session
+        no longer has, and the hole is named rather than papered over.
+
+        A client that names a frame the session never published is owed it
+        too, and is named in the same way: the server serves what it
+        remembers and says what it does not have.
+        """
+        oldest = self._oldest_retained_id()
+        latest = self._latest_event_id
+        rotated_out = last_event_id + 1 < oldest
+        ahead_of_session = last_event_id > latest
+        if not (rotated_out or ahead_of_session):
+            return None
+        self.gaps_served += 1
+        return {"requested_after": last_event_id, "oldest_retained": oldest}
+```
+
+A client that is exactly caught up — naming the newest frame the session
+published — is neither rotated out nor ahead of the session, and is given no
+gap.
+
+**Finding 2.** The route code below subscribes at the client's `Last-Event-ID`
+and leaves it there. A client that reconnects with an id the session has
+rotated past therefore finds no frame after its position, `next_frame` raises
+`SubscriberOverrun`, and the stream ends with an overflow frame and *no*
+frames — while blueprint §5 and §10 require the retained frames to be
+served, preceded by the gap frame.
+
+**Ruling 2.** A subscriber starts after the client's id, or at the oldest
+frame the session still holds when the client's id has rotated out of it:
+
+```python
+        self._next_subscription_id += 1
+        if last_event_id is None:
+            position = self._oldest_retained_id() - 1
+        else:
+            position = max(last_event_id, self._oldest_retained_id() - 1)
+        subscription = EventSubscription(
+            subscription_id=self._next_subscription_id,
+            position=position,
+        )
+```
+
+The gap is still named, because `gap_before` is asked about the id the
+client named, not about the position the subscriber was given.
+
+**Finding 3.** Task 3 makes the frame `id: <n>\nevent: ...\ndata: ...`.
+`backend/tests/test_stream_contract.py` L305-314 parses each frame
+positionally: `lines[0]` must start `"event: "` and `lines[1]` must start
+`"data: "`.
+
+**Ruling 3.** The parser reads the fields by name and asserts the id is
+present:
+
+```python
+        frames = [frame for frame in response.text.split("\n\n") if frame.strip()]
+        assert len(frames) == 3
+
+        names: list[str] = []
+        for frame in frames:
+            fields: dict[str, str] = {}
+            for line in frame.split("\n"):
+                key, _, value = line.partition(":")
+                fields[key] = value.strip()
+            assert fields["id"].isdigit()
+            assert "event" in fields
+            assert "data" in fields
+            name = fields["event"]
+            payload = json.loads(fields["data"])
+            names.append(name)
+            assert payload["event_type"] == name
+            assert set(payload) >= {"event_type", "step", "doc_id", "data"}
+            assert payload["doc_id"] == doc_id
+            assert isinstance(payload["data"], dict)
+```
+
 ---
 
 ### Task 4: The desktop client
@@ -1156,3 +1310,4 @@ old signature as a defaulted parameter, so the existing call sites and the
 direct calls in the tests keep working. `EventSubscription` loses its
 `frames` parameter and gains `position`; the only construction site is
 `subscribe()`, which Task 1 changes in the same step.
+
