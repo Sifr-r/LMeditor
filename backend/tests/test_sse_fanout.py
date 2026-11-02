@@ -504,7 +504,19 @@ def test_a_subscriber_that_fell_behind_is_told_and_disconnected() -> None:
     # advances only on a frame that has one, so the client stays able to
     # resume from the last sequence frame it received.
     assert "id" not in _fields(overflow)
+    # The frame names every frame the subscriber was never given: the ones
+    # the session published after the last one it read. It read frame 1, and
+    # the session then published STREAM_REPLAY_BUFFER + 2 more.
+    payload = json.loads(_fields(overflow)["data"])
+    assert payload["behind"] == STREAM_REPLAY_BUFFER + 2
+    # The history keeps the last STREAM_REPLAY_BUFFER frames, so the oldest
+    # it still holds is the latest id less that many, plus one.
+    latest = STREAM_REPLAY_BUFFER + 3
+    assert payload["oldest_retained"] == latest - STREAM_REPLAY_BUFFER + 1
     assert session.overflowed_subscribers == 1
+    # The session counts the frames it withheld from that one subscriber,
+    # which is every frame it published after the last one it read.
+    assert session.frames_withheld == STREAM_REPLAY_BUFFER + 2
     # The overflowed subscription is released: the subscriber count is back
     # to what it was before that stream attached.
     assert session.subscriber_count == before_attach
@@ -513,6 +525,39 @@ def test_a_subscriber_that_fell_behind_is_told_and_disconnected() -> None:
     # frame, the STREAM_REPLAY_BUFFER + 2 that pushed the stalled subscriber
     # out of the history, and the terminal frame.
     assert received == list(range(1, STREAM_REPLAY_BUFFER + 5))
+
+
+def test_asking_whether_a_gap_exists_does_not_count_a_gap() -> None:
+    """A query is not a service, so asking it counts nothing.
+
+    ``gap_before`` reads the session's history and answers whether a resume
+    could be served completely. The count of the resumes that could not be
+    served belongs to the serving, so asking the question twice must not
+    count two gaps.
+    """
+    doc_id = "doc_fanout_gap_query"
+
+    async def run() -> tuple[WorkflowSession, dict[str, int] | None, dict[str, int] | None]:
+        session = await session_manager.create_session(doc_id=doc_id, topic="fanout")
+        await session.publish_event(_event(doc_id, EventType.NODE_START, WorkflowStep.INGEST))
+        await session.complete()
+        # The client names a frame the session never published.
+        first = session.gap_before(999)
+        second = session.gap_before(999)
+        return session, first, second
+
+    session, first, second = asyncio.run(run())
+
+    # The query answers the same both times.
+    assert first is not None
+    assert first == second
+    assert first["requested_after"] == 999
+    # Asking counted nothing: a question is not a service.
+    assert session.gaps_served == 0
+
+    # The count belongs to the serving: one resume served one gap.
+    session.note_gap_served()
+    assert session.gaps_served == 1
 
 
 def test_a_dropped_stream_unsubscribes_and_stops_accumulating() -> None:

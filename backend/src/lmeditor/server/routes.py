@@ -1121,6 +1121,7 @@ async def stream_workflow_events(
                     # The gap frame carries no id: a client's last-event-id
                     # buffer advances only on a frame that has one, so the
                     # client stays able to resume from where it was.
+                    session.note_gap_served()
                     payload = json.dumps(gap)
                     yield f"event: gap\ndata: {payload}\n\n"
             while True:

@@ -76,13 +76,25 @@ class SubscriberOverrun(RuntimeError):
     the rest.
     """
 
-    def __init__(self, subscription_id: int, position: int, oldest_retained: int) -> None:
+    def __init__(
+        self,
+        subscription_id: int,
+        position: int,
+        oldest_retained: int,
+        frames_missed: int,
+    ) -> None:
         self.subscription_id = subscription_id
         self.position = position
         self.oldest_retained = oldest_retained
-        self.frames_missed = oldest_retained - position - 1
+        #: The frames the subscriber was never given: every frame the session
+        #: published after the last one it read. This is not the count of the
+        #: frames that have permanently left the history -- that is
+        #: ``oldest_retained - position - 1``, and the retained boundary makes
+        #: it derivable.
+        self.frames_missed = frames_missed
         super().__init__(
             f"subscriber {subscription_id} fell behind at frame {position}; "
+            f"it was never given {frames_missed} frame(s); "
             f"the session still remembers from frame {oldest_retained}"
         )
 
@@ -268,6 +280,11 @@ class WorkflowSession:
         oldest frame the session still holds. In the ahead-of-session case
         those two numbers do not describe a hole, because nothing is
         missed.
+
+        This is a query: it reads the session's history and counts nothing.
+        The count of the resumes that could not be served lives in
+        :meth:`note_gap_served`, which the one place that serves a gap
+        calls.
         """
         oldest = self._oldest_retained_id()
         latest = self._latest_event_id
@@ -275,8 +292,16 @@ class WorkflowSession:
         ahead_of_session = last_event_id > latest
         if not (rotated_out or ahead_of_session):
             return None
-        self.gaps_served += 1
         return {"requested_after": last_event_id, "oldest_retained": oldest}
+
+    def note_gap_served(self) -> None:
+        """Count one resume that could not be served completely.
+
+        The count belongs to the serving, not to the asking: a caller that
+        asks whether a gap exists has not served one. The route calls this
+        exactly once, for the one resume it answered with a gap frame.
+        """
+        self.gaps_served += 1
 
     async def unsubscribe(self, subscription: EventSubscription) -> None:
         """Detach a subscriber so a dropped client stops accumulating frames.
@@ -326,11 +351,20 @@ class WorkflowSession:
         they have left the history and cannot be given to it. The denial is
         counted wherever it is noticed, so that the two reads cannot
         disagree about whether a subscriber was owed frames it did not get.
+
+        The count is every frame the session published after the last one
+        the subscriber read, because that is what the subscriber was never
+        given. The frames that have permanently left the history are fewer:
+        they are ``oldest_retained - position - 1``, and the retained
+        boundary makes that count derivable.
         """
         oldest = self._oldest_retained_id()
         if oldest > subscription.position + 1:
             overrun = SubscriberOverrun(
-                subscription.subscription_id, subscription.position, oldest
+                subscription.subscription_id,
+                subscription.position,
+                oldest,
+                self._latest_event_id - subscription.position,
             )
             self.overflowed_subscribers += 1
             self.frames_withheld += overrun.frames_missed

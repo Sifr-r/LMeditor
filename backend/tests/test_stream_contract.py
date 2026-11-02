@@ -64,6 +64,13 @@ def _frame_fields(frame: str) -> dict[str, str]:
 #: terminal delivery would otherwise hang the whole suite instead of failing it.
 STREAM_READ_TIMEOUT: float = 10.0
 
+#: How long the wait for the worker's human review may last, and how often it
+#: looks. The worker loads model weights on a cold start, so the budget is
+#: measured in tens of seconds rather than in milliseconds: 6000 looks at
+#: 5ms apart is half a minute.
+HITL_WAIT_INTERVAL: float = 0.005
+HITL_WAIT_ATTEMPTS: int = 6000
+
 
 def _chunk() -> SourceChunk:
     text = "Grounded writing requires verifiable citations."
@@ -747,10 +754,19 @@ def _force_the_gate(monkeypatch: Any) -> None:
 
 
 async def _wait_until_pending(session: WorkflowSession) -> None:
-    for _ in range(1000):
+    """Wait for the worker to reach the gate and open its human review.
+
+    The wait is for a *worker*, not for an in-process condition: the worker
+    loads model weights before it reaches the gate, so a cold start takes
+    tens of seconds where an in-process condition would take milliseconds.
+    The budget is therefore measured in seconds. It stays bounded, so a
+    worker that never opens a review fails the test instead of hanging the
+    suite.
+    """
+    for _ in range(HITL_WAIT_ATTEMPTS):
         if session.hitl_pending:
             return
-        await asyncio.sleep(0.002)
+        await asyncio.sleep(HITL_WAIT_INTERVAL)
     raise AssertionError("worker never opened a pending human review")
 
 
