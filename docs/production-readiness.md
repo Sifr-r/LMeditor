@@ -150,14 +150,20 @@ the ledger is ARCHITECTURE.md §33.
   what it remembers and names what it does not, in a `gap` control frame. The
   rule is the same in both directions: a request the session has rotated past
   and a request the session has not reached yet are both named.
+- **The client tells its caller.** The two control frames arrive as messages of
+  their own, beside the run's events, and the desktop client puts them in the
+  operator's notice. A client that is told what it missed can tell a run that
+  lost frames from one that did not; a client that throws the notice away
+  cannot. A control frame whose payload the client cannot read is reported as
+  a malformed frame, not skipped.
 
 What it does not do: the stream is not lossless for a client that was away
-longer than the session's memory. That client is told what it missed and is
-meant to re-fetch the document's state, and **that re-fetch is not
-implemented**. The `token_delta` whole-sequence replay is still not caught
-either: the backend now publishes the frame identity, but the reducer is not
-given it, so the suffix test stands. macOS and Python 3.12 remain
-unexercised.
+longer than the session's memory. That client is told what it missed — the
+notice reaches the operator — and is meant to re-fetch the document's state, and
+**that re-fetch is not implemented**. The `token_delta` whole-sequence replay
+is still not caught either: the backend now publishes the frame identity, but
+the reducer is not given it, so the suffix test stands. macOS and Python 3.12
+remain unexercised.
 
 ## Remaining release work, in order
 

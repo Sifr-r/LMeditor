@@ -5344,6 +5344,13 @@ and ends the stream with an `overflow` control frame naming what was missed —
 `{"reason", "behind", "oldest_retained"}` — so the client knows the run is
 still going and can reconnect with the id of the last frame it received.
 
+`behind` is the number of frames the subscriber was **never given**: the ones
+the session published after the last one it read. That is what the blueprint's
+§7 means by *"frames a subscriber was never given because it fell behind"*, and
+it is why the blueprint's own example has `behind` greater than
+`oldest_retained`. The frames that are gone for good stay derivable — they are
+the ones between the subscriber's position and `oldest_retained`.
+
 - Proved on the server by
   `backend/tests/test_sse_fanout.py::test_a_subscriber_that_fell_behind_is_told_and_disconnected`:
   the overflowed stream ends with the control frame, **the overflowed
@@ -5405,19 +5412,40 @@ nonsense, so the route refuses rather than guessing.
 
 ### 33.6 The client's half
 
-The desktop client had to change in three ways, and each of them was a
+The desktop client had to change in four ways, and each of them was a
 behaviour the old client did not have.
 
 - It reads the `event:` field and recognises the two control frames instead of
   decoding them as events. Before this, the `overflow` and `gap` frames were
   `BackendError.Malformed` — the client failed on exactly the frames the
   server sends to tell it something.
+- It hands the two control frames to its caller. They are the server's word
+  about the stream itself, and a caller that cannot see them cannot tell a run
+  that lost frames from one that did not. They arrive as messages of their own
+  — `SseMessage.Gap` and `SseMessage.Overflow` — beside the run's events,
+  carrying what they say. A control frame whose payload the client cannot read
+  is `BackendError.Malformed`, not a frame to skip.
 - It reconnects **once**. A retry loop needs a backoff and a budget, which is a
   different decision; so a second overflow ends the stream and the caller sees
   a run that stopped short, rather than a loop that never stops.
 - It closes the body when the flow is cancelled, so a blocked read is
   unblocked. The body is read on a worker in `Dispatchers.IO` and held in an
   `AtomicReference` that `awaitClose` closes.
+
+`SseMessage` is a sealed type with three cases — `Event`, `Gap` and
+`Overflow` — so the notices cannot be mistaken for events and cannot be
+dropped by a caller that does not handle them. `StudioController` puts both
+notices in `StudioState.notice`, the channel the desktop already uses for
+"something happened the operator should know", and not in `StudioState.error`,
+because the run continued.
+
+The gap notice distinguishes the two cases the payload describes. When the
+frames really are gone it names them; when the client resumed **ahead** of
+the session — naming a frame the session has not published yet — nothing is
+missing, and the notice says that rather than claiming a loss. The overflow
+notice says how many frames the server withheld and that it ended that stream.
+It does not claim the stream was reopened, because the client reopens it on
+the first overflow only, and a second one ends the run instead.
 
 The end of a stream is not a failure: a finished run is a finished stream. And
 the honesty of the bounded stop rests on `StudioController`, which already
@@ -5490,6 +5518,42 @@ not in the event's data, so the reducer is not given it. The limitation stands
 and the suffix test stays; the reason for it changed, and the docstring now
 names the reason that still holds.
 
+A final review of the whole branch, after every task had passed its own
+review, found four more. It ran thirteen mutation experiments, each reverted
+and each caught by exactly the expected test, and re-derived every count in
+this section from the evidence rather than from the prose.
+
+**The client threw away what the server told it.** The server named what a
+client missed and sent it in the control frame's data; the client read the
+frame, recognised the name, and dropped the payload. Its public API returned
+`Flow<WorkflowEvent>`, so there was no channel by which a notice could reach
+the caller. The run ended looking successful while the state was silently
+short — and for a `token_delta` the document text was silently missing frames,
+which the reducer's suffix test cannot detect, because it catches a repeated
+frame and not a missing one. Fixed in §33.6.
+
+**`frames_withheld` counted the wrong quantity.** The blueprint defines it as
+*"frames a subscriber was never given because it fell behind"*, and the
+implementation counted the frames that had left the history — the ones gone
+for good. In this repository's own scenario the subscriber was never given
+514 frames and the counter recorded 2. The blueprint's own example payload
+settles the meaning: `behind` is greater than `oldest_retained`, which is
+only true of how far behind the subscriber is. Both the counter and the
+payload's `behind` now carry the frames never given; the frames permanently
+gone stay derivable from `oldest_retained`.
+
+**`gap_before()` was a query that counted.** It read like a pure question and
+incremented `gaps_served` on the way, so asking it twice counted two gaps. It
+is a query now, and the counting belongs to `note_gap_served()`, which the
+route calls at the one place a gap is served.
+
+**A cold-start flake in an unrelated test.**
+`test_approval_resumes_the_real_graph_and_completes` waited two seconds for a
+worker that loads model weights — 26.9 seconds on a cold start, against
+8.1 seconds warm. It was flaky before this slice and would have made the
+hosted gate flaky with it, so the budget was raised to half a minute and the
+reason recorded in the test.
+
 ### 33.8 What it proves, and what it does not
 
 What it proves: that the live stream's subscriber memory is bounded and small,
@@ -5502,9 +5566,11 @@ subscription behind.
 What it does **not** prove:
 
 - **The stream is not lossless for a client that was away longer than the
-  session's memory.** That client gets a `gap`, is told, and is meant to
-  re-fetch the document's state. **That re-fetch is not implemented.** The
-  blueprint puts it out of scope for this slice, and it stays out of scope.
+  session's memory.** That client gets a `gap`, and the notice naming what it
+  missed now reaches the operator. What it does **not** get is the re-fetch
+  of the document's state that would make it whole again. **That re-fetch is
+  not implemented** — the blueprint puts it out of scope for this slice, and
+  it stays out of scope.
 - **The `token_delta` whole-sequence replay is still not caught.** The backend
   now publishes a frame identity — the first of the two things §29.6 said the
   fix needed — but the identity is on the SSE frame and not in the event's
@@ -5523,6 +5589,14 @@ What it does **not** prove:
   pinning it.** The server writes every frame with data and never emits a
   comment block, so the path is reachable only by an intermediary that injects
   one.
+- **`StudioState.notice` holds one notice, and the last one wins.** A gap
+  notice names frames that are gone for good; an overflow notice says the
+  stream fell behind. If an overflow follows a gap on the same run, the
+  overflow's notice replaces the gap's, and the permanent loss is quieter than
+  it was. Nothing is dropped silently — the server's `gaps_served` and
+  `frames_withheld` counters record both — but the operator sees one notice,
+  not a history of them. A second field would fix it, and the slice did not
+  add one.
 - **`StudioController`'s *"the event stream ended before the run completed"*
   branch and `HttpTransport`'s `onCancellation` handler are outside this
   slice's files, and are not covered by a test in the desktop module.**
@@ -5551,9 +5625,9 @@ The local portable gate passes on this tree, and its evidence is kept under
 
 | | |
 |---|---|
-| Kotlin tests | **1,079** across 15 modules, 0 failures, 0 errors, 0 skipped (desktop 138) |
+| Kotlin tests | **1,081** across 15 modules, 0 failures, 0 errors, 0 skipped (desktop 140) |
 | Strict Python typing | **135 source files**, clean for `--platform linux` and `--platform win32` |
-| Backend suite (full) | **1,748 passed**, 0 failed |
+| Backend suite (full) | **1,749 passed**, 0 failed |
 | Backend suite (portable) | 1,724 passed, 5 deselected, 0 failed |
 | Kotlin parity | 26 agreed, 0 disagreed, 0 skipped |
 | Live HTTP round trip | every check passed |
@@ -5563,23 +5637,25 @@ deselections and the three excluded Word modules are recorded beside it in
 `external-checks.json`.
 
 The baseline was 1,075 Kotlin tests and 1,740 backend tests. The slice adds
-**4** Kotlin tests and **8** backend tests:
+**6** Kotlin tests and **9** backend tests:
 
 | | |
 |---|---|
 | `test_a_subscriber_holds_no_frames_of_its_own` | the subscriber holds no frames of its own |
-| `test_a_subscriber_that_fell_behind_is_told_and_disconnected` | the overflow frame, the release of the subscription, and the other subscriber keeping every frame |
+| `test_a_subscriber_that_fell_behind_is_told_and_disconnected` | the overflow frame, the release of the subscription, the other subscriber keeping every frame, and the count of the frames withheld |
 | `test_a_reconnect_with_the_last_event_id_is_served_exactly_the_frames_after_it` | the exact resume |
 | `test_a_reconnect_the_session_can_no_longer_serve_is_told_the_gap` | the gap frame |
 | `test_a_reconnect_with_an_id_the_session_has_rotated_past_is_served_what_is_left` | the rotated-past resume |
 | `test_the_ids_of_one_stream_go_up_and_never_repeat` | the identity |
 | `test_a_last_event_id_that_is_not_a_frame_id_is_refused` | the 400 |
 | `test_a_last_event_id_that_is_not_a_frame_id_in_any_other_spelling_is_refused` | the 400, in every other spelling |
+| `test_asking_whether_a_gap_exists_does_not_count_a_gap` | asking the question is not serving the resume |
 
-The four Kotlin tests are `an overflow frame ends the stream and the client
+The six Kotlin tests are `an overflow frame ends the stream and the client
 reconnects with its last id`, `a second overflow does not reopen the stream`, `a
-comment block with no data is read past` and `a gap frame names what was
-missed and the stream carries on`.
+comment block with no data is read past`, `a gap frame names what was missed
+and the stream carries on`, `a control frame the client cannot read is
+reported` and `the stream's control frames reach the operator as notices`.
 
 Several of the new tests were verified to **fail without** their fix and to
 pass with it, because a test that cannot fail proves nothing. The recorded
@@ -5595,5 +5671,10 @@ mutations, each reverted, each caught by a failing test:
   failed with `BackendError.Malformed`;
 - the client's control-frame handling — the two new desktop control-frame
   tests, which failed with `BackendError.Malformed` because the control frame
-  was decoded as an event.
+  was decoded as an event;
+- the client's notice delivery — the controller's test, which failed with no
+  notice at all when the messages were dropped;
+- the counter's arithmetic — the overflow test, which failed on the count;
+- the gap counter's ownership — the gap query's test, which counted two gaps
+  where it should have counted none.
 
