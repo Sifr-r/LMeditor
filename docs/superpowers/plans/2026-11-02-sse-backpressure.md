@@ -1070,6 +1070,43 @@ present:
             assert isinstance(payload["data"], dict)
 ```
 
+### Correction 7 — Task 3: the header is declared with `Annotated`, not with a `Header` default
+
+**Finding.** The plan declares the resume header as
+
+```python
+last_event_id: str | None = Header(default=None, alias="Last-Event-ID"),
+```
+
+FastAPI's `Header(...)` returns a `Header` object, and that object becomes the
+function's actual default value. Over HTTP, FastAPI reads the default from the
+parameter's metadata, so a request without the header gets `None` — but a
+**direct call** to the route receives the `Header` object itself. The SSE tests
+drive `routes.stream_workflow_events(doc_id)` directly, so `int(last_event_id)`
+would be called on a `Header` object: a `TypeError`, which is not the
+`ValueError` the route catches, and the tests that call the route directly
+would fail.
+
+**Ruling.** Declare the header with `Annotated`, which keeps a real `None` as
+the function's default and lets FastAPI read the header from the annotation's
+metadata:
+
+```python
+from typing import Annotated
+...
+async def stream_workflow_events(
+    doc_id: str,
+    last_event_id: Annotated[str | None, Header(alias="Last-Event-ID")] = None,
+) -> StreamingResponse:
+```
+
+A direct call then receives `None`, exactly as a request without the header
+does. `Annotated` is already the house spelling for a constrained parameter in
+this tree (`lmeditor/notebooks/__init__.py`).
+
+The header's name is matched case-insensitively: `Last-Event-ID`,
+`last-event-id` and `LAST-EVENT-ID` all reach the route.
+
 ---
 
 ### Task 4: The desktop client
