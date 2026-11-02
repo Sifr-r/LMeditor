@@ -186,6 +186,10 @@ class WorkflowSession:
         #: frames were published to the session's history; they were
         #: withheld from that one subscriber.
         self.frames_withheld: int = 0
+        #: Resumes that could not be served completely: a client asked for
+        #: frames the session does not have, and was told so rather than
+        #: being left to assume it has everything.
+        self.gaps_served: int = 0
 
     # ------------------------------------------------------------------
     # Subscriber fan-out
@@ -212,11 +216,18 @@ class WorkflowSession:
         """
         return len(self._subscribers)
 
-    async def subscribe(self) -> EventSubscription:
+    async def subscribe(self, last_event_id: int | None = None) -> EventSubscription:
         """Register a subscriber at a position in the session's history.
 
-        A subscriber starts at the oldest frame the session still holds, so
+        A subscriber that names the frame it last received starts after
+        it, so it is given exactly the frames it missed. A subscriber that
+        names none starts at the oldest frame the session still holds, so
         it is given the recent history and the live frames that follow.
+
+        A subscriber that names a frame the session no longer holds starts
+        at the oldest frame it does hold: the frames it missed have left
+        the history, and :meth:`gap_before` names the hole rather than the
+        stream quietly serving a shortened sequence.
 
         A subscription on an already-closed session comes back **already
         terminated**: the history ends with the terminal frame and there is
@@ -225,13 +236,37 @@ class WorkflowSession:
         not registered for fan-out.
         """
         self._next_subscription_id += 1
+        if last_event_id is None:
+            position = self._oldest_retained_id() - 1
+        else:
+            position = max(last_event_id, self._oldest_retained_id() - 1)
         subscription = EventSubscription(
             subscription_id=self._next_subscription_id,
-            position=self._oldest_retained_id() - 1,
+            position=position,
         )
         if not self._terminated:
             self._subscribers[subscription.subscription_id] = subscription
         return subscription
+
+    def gap_before(self, last_event_id: int) -> dict[str, int] | None:
+        """What a resume could not be given, if anything.
+
+        The session remembers the last ``STREAM_REPLAY_BUFFER`` frames. A
+        client that was away longer than that is owed frames the session
+        no longer has, and the hole is named rather than papered over.
+
+        A client that names a frame the session never published is owed it
+        too, and is named in the same way: the server serves what it
+        remembers and says what it does not have.
+        """
+        oldest = self._oldest_retained_id()
+        latest = self._latest_event_id
+        rotated_out = last_event_id + 1 < oldest
+        ahead_of_session = last_event_id > latest
+        if not (rotated_out or ahead_of_session):
+            return None
+        self.gaps_served += 1
+        return {"requested_after": last_event_id, "oldest_retained": oldest}
 
     async def unsubscribe(self, subscription: EventSubscription) -> None:
         """Detach a subscriber so a dropped client stops accumulating frames.

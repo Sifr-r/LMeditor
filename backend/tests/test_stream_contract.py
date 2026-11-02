@@ -40,7 +40,7 @@ def _client(app: Any) -> httpx.AsyncClient:
 
 
 #: Upper bound on a full SSE read. The stream endpoint is a generator that only
-#: ends when a session delivers its terminal sentinel, so a regression in
+#: ends when a session delivers its terminal frame, so a regression in
 #: terminal delivery would otherwise hang the whole suite instead of failing it.
 STREAM_READ_TIMEOUT: float = 10.0
 
@@ -307,11 +307,15 @@ def test_stream_frames_carry_canonical_envelope() -> None:
 
         names: list[str] = []
         for frame in frames:
-            lines = frame.split("\n")
-            assert lines[0].startswith("event: ")
-            assert lines[1].startswith("data: ")
-            name = lines[0][len("event: ") :]
-            payload = json.loads(lines[1][len("data: ") :])
+            fields: dict[str, str] = {}
+            for line in frame.split("\n"):
+                key, _, value = line.partition(":")
+                fields[key] = value.strip()
+            assert fields["id"].isdigit()
+            assert "event" in fields
+            assert "data" in fields
+            name = fields["event"]
+            payload = json.loads(fields["data"])
             names.append(name)
             assert payload["event_type"] == name
             assert set(payload) >= {"event_type", "step", "doc_id", "data"}
@@ -347,6 +351,149 @@ def test_stream_rejection_terminates_with_workflow_error() -> None:
         assert response.status_code == 200
         assert "event: workflow_complete" not in response.text
         assert "event: workflow_error" in response.text
+    finally:
+        # The registry is process-wide: the session this test opened is taken
+        # out of it again, whether the body succeeded or not.
+        asyncio.run(session_manager.remove_session(doc_id))
+
+
+# ---------------------------------------------------------------------------
+# Frame identity and the resume
+# ---------------------------------------------------------------------------
+
+
+def test_a_reconnect_with_the_last_event_id_is_served_exactly_the_frames_after_it() -> None:
+    """A reconnecting client is given the frames it missed, and no others.
+
+    The client names the last frame it received; the server serves the
+    frames after it. The frames are numbered, so the client can see that
+    the sequence is continuous.
+    """
+    doc_id = "doc_resume_exact"
+
+    async def run() -> tuple[httpx.Response, httpx.Response]:
+        session = await session_manager.create_session(doc_id=doc_id, topic="resume")
+        await session.publish_event(
+            WorkflowEvent(
+                event_type=EventType.NODE_START,
+                step=WorkflowStep.INGEST,
+                doc_id=doc_id,
+                data={"step": "ingest", "topic": "resume"},
+            )
+        )
+        await session.publish_event(
+            WorkflowEvent(
+                event_type=EventType.NODE_COMPLETE,
+                step=WorkflowStep.DRAFT_SECTIONS,
+                doc_id=doc_id,
+                data={"step": "draft_sections", "topic": "resume"},
+            )
+        )
+        await session.complete(sections=[{"section_id": "sec_1", "title": "Intro"}])
+
+        app = create_app()
+        async with _client(app) as client:
+            first = await asyncio.wait_for(
+                client.get(f"/api/v1/stream/{doc_id}"), timeout=STREAM_READ_TIMEOUT
+            )
+            resumed = await asyncio.wait_for(
+                client.get(
+                    f"/api/v1/stream/{doc_id}",
+                    headers={"Last-Event-ID": "1"},
+                ),
+                timeout=STREAM_READ_TIMEOUT,
+            )
+        return first, resumed
+
+    try:
+        first, resumed = asyncio.run(run())
+
+        assert first.status_code == resumed.status_code == 200
+        resumed_ids = [
+            line[len("id: ") :]
+            for line in resumed.text.splitlines()
+            if line.startswith("id: ")
+        ]
+        assert resumed_ids == ["2", "3"]
+    finally:
+        # The registry is process-wide: the session this test opened is taken
+        # out of it again, whether the body succeeded or not.
+        asyncio.run(session_manager.remove_session(doc_id))
+
+
+def test_a_reconnect_the_session_can_no_longer_serve_is_told_the_gap() -> None:
+    """A resume the history cannot serve completely says so.
+
+    The client asked for the frames after a frame the session no longer
+    remembers. It is given what the session still has, and told exactly
+    which frames it will not be given.
+    """
+    doc_id = "doc_resume_gap"
+
+    async def run() -> httpx.Response:
+        session = await session_manager.create_session(doc_id=doc_id, topic="resume")
+        await session.publish_event(
+            WorkflowEvent(
+                event_type=EventType.NODE_START,
+                step=WorkflowStep.INGEST,
+                doc_id=doc_id,
+                data={"step": "ingest", "topic": "resume"},
+            )
+        )
+        await session.complete(sections=[{"section_id": "sec_1", "title": "Intro"}])
+
+        app = create_app()
+        async with _client(app) as client:
+            return await asyncio.wait_for(
+                client.get(
+                    f"/api/v1/stream/{doc_id}",
+                    headers={"Last-Event-ID": "999"},
+                ),
+                timeout=STREAM_READ_TIMEOUT,
+            )
+
+    try:
+        response = asyncio.run(run())
+
+        assert response.status_code == 200
+        assert "event: gap" in response.text
+        gap = json.loads(
+            [line for line in response.text.splitlines() if line.startswith("data: ")][0][
+                len("data: ") :
+            ]
+        )
+        assert gap["requested_after"] == 999
+    finally:
+        # The registry is process-wide: the session this test opened is taken
+        # out of it again, whether the body succeeded or not.
+        asyncio.run(session_manager.remove_session(doc_id))
+
+
+def test_a_last_event_id_that_is_not_a_frame_id_is_refused() -> None:
+    """A header that is not a frame id is a client error.
+
+    Ignoring it would serve the wrong frames, and the client would
+    believe it had resumed when it had not.
+    """
+    doc_id = "doc_resume_bad_header"
+
+    async def run() -> httpx.Response:
+        session = await session_manager.create_session(doc_id=doc_id, topic="resume")
+        await session.complete(sections=[{"section_id": "sec_1", "title": "Intro"}])
+        app = create_app()
+        async with _client(app) as client:
+            return await asyncio.wait_for(
+                client.get(
+                    f"/api/v1/stream/{doc_id}",
+                    headers={"Last-Event-ID": "not-a-number"},
+                ),
+                timeout=STREAM_READ_TIMEOUT,
+            )
+
+    try:
+        response = asyncio.run(run())
+
+        assert response.status_code == 400
     finally:
         # The registry is process-wide: the session this test opened is taken
         # out of it again, whether the body succeeded or not.

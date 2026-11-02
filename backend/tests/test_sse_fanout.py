@@ -76,6 +76,20 @@ def _event(doc_id: str, event_type: EventType, step: WorkflowStep, **data: Any) 
     return WorkflowEvent(event_type=event_type, step=step, doc_id=doc_id, data=data)
 
 
+def _field(frame: str, name: str) -> str:
+    """One field of an SSE frame, read by name rather than by position.
+
+    A frame's fields are read by name so that a frame can carry another
+    field -- the frame id -- without every reader of a frame having to
+    know where it sits.
+    """
+    for line in frame.split("\n"):
+        key, _, value = line.partition(":")
+        if key == name:
+            return value.strip()
+    raise AssertionError(f"the frame carries no {name!r} field: {frame!r}")
+
+
 def _types(frames: list[WorkflowEvent]) -> list[EventType]:
     return [frame.event_type for frame in frames]
 
@@ -500,7 +514,7 @@ def test_a_dropped_stream_unsubscribes_and_stops_accumulating() -> None:
         response = await routes.stream_workflow_events(doc_id)
         body = cast(AsyncGenerator[str, None], response.body_iterator)
         first_frame = await asyncio.wait_for(body.__anext__(), timeout=WAIT_TIMEOUT)
-        assert first_frame.startswith("event: node_start")
+        assert _field(first_frame, "event") == "node_start"
         assert session.subscriber_count == 1
 
         # The client goes away mid-stream.
@@ -515,7 +529,7 @@ def test_a_dropped_stream_unsubscribes_and_stops_accumulating() -> None:
 
     first_frame, session = asyncio.run(run())
 
-    assert first_frame.startswith("event: node_start")
+    assert _field(first_frame, "event") == "node_start"
     assert session.subscriber_count == 0
     assert session.is_completed is True
 
@@ -548,13 +562,10 @@ def test_a_reconnecting_stream_replays_the_session_history_over_http() -> None:
 
     assert first.status_code == second.status_code == 200
     for response in (first, second):
-        names = [
-            frame.split("\n")[0][len("event: ") :]
-            for frame in response.text.split("\n\n")
-            if frame.strip()
-        ]
+        frames = [frame for frame in response.text.split("\n\n") if frame.strip()]
+        names = [_field(frame, "event") for frame in frames]
         assert names == ["node_start", "workflow_complete"]
-        assert json.loads(response.text.split("\n")[1][len("data: ") :])["doc_id"] == doc_id
+        assert json.loads(_field(frames[0], "data"))["doc_id"] == doc_id
 
 
 # ---------------------------------------------------------------------------

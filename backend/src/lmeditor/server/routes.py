@@ -5,8 +5,8 @@ import json
 import logging
 import uuid
 from pathlib import Path
-from typing import Any, AsyncGenerator
-from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile, status
+from typing import Annotated, Any, AsyncGenerator
+from fastapi import APIRouter, File, Form, Header, HTTPException, Query, UploadFile, status
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field, model_validator
 from pydantic import ValidationError as PydanticValidationError
@@ -1048,23 +1048,29 @@ def _kind_from_extension(path: Path) -> SourceKind:
     response_class=StreamingResponse,
     summary="Stream real-time workflow events via SSE",
 )
-async def stream_workflow_events(doc_id: str) -> StreamingResponse:
+async def stream_workflow_events(
+    doc_id: str,
+    last_event_id: Annotated[str | None, Header(alias="Last-Event-ID")] = None,
+) -> StreamingResponse:
     """Connect to Server-Sent Events stream for a specific document workflow.
 
-    Each sequence frame is ``event: <event_type>`` plus a ``data:`` JSON
-    envelope of ``{event_type, step, doc_id, data}``. The terminal frames are
-    exactly ``workflow_complete`` and ``workflow_error``; the stream ends once
-    the subscriber has read the terminal frame.
+    Each frame is ``id: <n>`` plus ``event: <event_type>`` and a ``data:``
+    JSON envelope of ``{event_type, step, doc_id, data}``. The terminal
+    frames are exactly ``workflow_complete`` and ``workflow_error``, after
+    which the stream closes.
+
+    Every request gets its own subscription, so concurrent streams on one
+    document each receive the full frame sequence instead of dividing it.
+
+    A client that reconnects names the last frame it received in
+    ``Last-Event-ID``, and is given the frames after it. A client that was
+    away longer than the session remembers is told what it missed with a
+    ``gap`` frame, rather than being left to assume it has everything.
 
     A subscriber that falls behind the session's history cannot be given the
     frames it has not read, because they have left it. Its stream ends with
     an ``overflow`` control frame instead, whose ``data:`` names what was
     missed, so the client knows the run is still going and reconnects.
-
-    Every request gets its own subscription, so concurrent streams on one
-    document each receive the full frame sequence instead of dividing it, and a
-    stream attached to a finished session is closed immediately from the
-    session's history rather than waiting on a frame nobody publishes.
     """
     session = await session_manager.get_session(doc_id)
     if not session:
@@ -1073,9 +1079,30 @@ async def stream_workflow_events(doc_id: str) -> StreamingResponse:
             detail=f"Workflow session '{doc_id}' not found.",
         )
 
-    async def event_generator() -> AsyncGenerator[str, None]:
-        subscription = await session.subscribe()
+    resume_from: int | None = None
+    if last_event_id is not None:
         try:
+            resume_from = int(last_event_id)
+        except ValueError as exc:
+            # A header that is not a frame id is refused rather than ignored:
+            # serving the wrong frames to a client that believes it has
+            # resumed is worse than refusing it.
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Last-Event-ID is not a frame id.",
+            ) from exc
+
+    async def event_generator() -> AsyncGenerator[str, None]:
+        subscription = await session.subscribe(resume_from)
+        try:
+            if resume_from is not None:
+                gap = session.gap_before(resume_from)
+                if gap is not None:
+                    # The gap frame carries no id: a client's last-event-id
+                    # buffer advances only on a frame that has one, so the
+                    # client stays able to resume from where it was.
+                    payload = json.dumps(gap)
+                    yield f"event: gap\ndata: {payload}\n\n"
             while True:
                 try:
                     frame = await session.next_frame(subscription)
@@ -1099,7 +1126,7 @@ async def stream_workflow_events(doc_id: str) -> StreamingResponse:
                     break
                 event_id, event = frame
                 payload = json.dumps(event.model_dump(mode="json"))
-                yield f"event: {event.event_type.value}\ndata: {payload}\n\n"
+                yield f"id: {event_id}\nevent: {event.event_type.value}\ndata: {payload}\n\n"
         finally:
             # A dropped client must not keep a subscription alive or keep a
             # position that nothing will ever read.
