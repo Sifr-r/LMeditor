@@ -505,7 +505,9 @@ class StudioController(
             }
             // The run has begun: the strip says so before the server answers,
             // so the window never shows itself as idle while it is working.
-            updateState { it.copy(status = "starting", error = null) }
+            updateState {
+                it.copy(status = "starting", error = null, notice = null)
+            }
             val sourceIds = current.selectedSourceId?.let { listOf(it) } ?: emptyList()
             val ack = try {
                 backend.generate(topic, sourceIds, current.operatorOutline)
@@ -542,6 +544,7 @@ class StudioController(
                     selectedClaimId = null,
                     selectedChunkId = null,
                     notice = "Run started.",
+                    streamLossNotice = null,
                 )
             }
             followStream(this, ack.docId, token)
@@ -1366,7 +1369,15 @@ class StudioController(
                         owner.updateState { state ->
                             when (message) {
                                 is SseMessage.Event -> RunReducer.reduce(state, message.event)
-                                is SseMessage.Gap -> state.copy(notice = gapNotice(message))
+                                is SseMessage.Gap -> {
+                                    val notice = gapNotice(message)
+                                    val lostFrames = message.oldestRetained.toLong() >
+                                        message.requestedAfter.toLong() + 1
+                                    state.copy(
+                                        notice = notice,
+                                        streamLossNotice = state.streamLossNotice ?: notice.takeIf { lostFrames },
+                                    )
+                                }
                                 is SseMessage.Overflow -> state.copy(notice = overflowNotice(message))
                             }
                         }

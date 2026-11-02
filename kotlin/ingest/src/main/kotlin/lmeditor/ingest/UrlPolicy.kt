@@ -48,14 +48,14 @@ private val RESERVED_DEVICE_NAMES: Set<String> = setOf(
 )
 
 /**
- * True when [character] is a control character: a C0 control or DEL.
+ * True when [character] is a control character: C0, DEL or C1.
  *
  * None of them has a meaning in a URL, a source id or a file name, and every
  * one of them is a way to confuse the text that is written to a socket or
  * handed to the filesystem.
  */
 private fun isControlCharacter(character: Char): Boolean =
-    character.code <= 0x1f || character.code == 0x7f
+    character.isISOControl()
 
 /**
  * True when [name] is a name Windows reserves for one of its devices.

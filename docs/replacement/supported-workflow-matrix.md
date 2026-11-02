@@ -1,6 +1,7 @@
 # Supported workflow matrix
 
-Date: 27 October 2026  
+Date: 2 November 2026
+
 Status: the human-readable view of [`requirements.json`](requirements.json), which is the machine-readable registry of the same requirements.
 Scope: one row per requirement of [`docs/product-replacement-roadmap.md`](../product-replacement-roadmap.md).
 
@@ -190,7 +191,7 @@ An owner is written `<tier>:<module>` and names the module that **owns the rule*
 | `R.05` | Measured latency and memory budgets | `M4` | `cross:evidence` | `not-started` | Benchmark the 100-page document, the 10,000-note vault and the 100-source notebook, then read back the measured p95 latency and the memory. | — |
 | `R.06` | Latency separation and UI responsiveness | `M4` | `cross:evidence` | `not-started` | Run a long job while editing and navigating, then read back the local-interaction latency measured apart from the model latency. | — |
 | `R.07` | Boundary limits and input sanitisation | `M4` | `kotlin:ingest` | `in-progress` | Submit an oversized upload, a private-host URL and a path that escapes the root, then read back the refusal for each. | kotlin/ingest/src/main/kotlin/lmeditor/ingest/Limits.kt:22; kotlin/ingest/src/main/kotlin/lmeditor/ingest/UrlPolicy.kt:315; backend/tests/test_ingestion_security.py:9 |
-| `R.08` | Authenticated local gateway | `M4` | `kotlin:server` | `in-progress` | Call the gateway from a foreign origin and read back the refusal of the mutation, then call it without the installation credential and read back the refusal of that request too: the origin half is implemented, the installation credential is not. | backend/src/lmeditor/server/app.py:130; backend/src/lmeditor/server/app.py:146; backend/src/lmeditor/server/app.py:230; backend/src/lmeditor/server/app.py:460; backend/src/lmeditor/server/app.py:464 |
+| `R.08` | Authenticated local gateway | `M4` | `kotlin:server` | `complete` | Call the gateway from a foreign origin and read back the refusal of the mutation, then call it without the installation credential and read back the refusal of that request too. | backend/src/lmeditor/server/app.py:136; backend/src/lmeditor/server/app.py:152; backend/src/lmeditor/server/app.py:443; backend/src/lmeditor/server/app.py:506; backend/src/lmeditor/server/credential.py:129; backend/src/lmeditor/server/credential.py:259; backend/tests/test_api_credential.py:124; backend/tests/test_api_credential.py:256; kotlin/desktop/src/main/kotlin/lmeditor/desktop/net/ApiCredential.kt:89 |
 | `R.09` | Secrets in protected storage | `M4` | `python:llm` | `not-started` | Configure a provider key, read the diagnostics dump, then read back that no key and no document content appears in it. | — |
 | `R.10` | Access checks on retrieval and export | `M4` | `kotlin:server` | `in-progress` | Revoke a source, then request retrieval, an artifact export and a source download, then read back the refusal and the preserved history. | backend/src/lmeditor/notebooks/answer.py:95; backend/src/lmeditor/server/sources.py:161 |
 | `R.11` | Reproducible diagnostics and repair | `M4` | `cross:delivery` | `not-started` | Run the diagnostics action, read back the storage and index status, then rebuild the index and read back the rebuilt state. | — |
@@ -223,9 +224,9 @@ This matrix describes **83 requirements**, the same count the roadmap carries an
 | Status | Requirements |
 | :--- | ---: |
 | `not-started` | 46 |
-| `in-progress` | 36 |
+| `in-progress` | 35 |
 | `evidence-partial` | 1 |
-| `complete` | 0 |
+| `complete` | 1 |
 | **Total** | **83** |
 
 ### Requirements not started
@@ -236,6 +237,6 @@ The `blocks` column of the registry is not reproduced here. It records the requi
 
 ### What this is, and what it is not
 
-This is a **snapshot of the working tree as it stood on 27 October 2026**, not a certification. It records what was found in the source when it was read; it does not certify that the code works, that any workflow runs end to end, or that the product replaces the three applications the roadmap is about.
+This is a **registry snapshot reconciled on 2 November 2026**, not a new product certification. Its statuses and evidence are taken from the registry; this reconciliation does not establish that every workflow runs end to end or that the product replaces the three applications the roadmap is about.
 
-A status of `in-progress` means a partial implementation was found, not that the requirement is nearly done. A status of `complete` would mean all six parts of roadmap §10's definition of done were shown, and no requirement in this snapshot claims that. The matrix is regenerated from the registry, so it is exactly as current — and exactly as provisional — as the evidence behind it.
+A status of `in-progress` means a partial implementation was found, not that the requirement is nearly done. The registry records `R.08` as `complete`, with its recorded evidence; every other requirement retains its recorded status. The matrix reflects the registry and remains as current as the evidence behind it.
