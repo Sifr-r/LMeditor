@@ -405,9 +405,72 @@ duplication — which is exactly what the existing assertions expect. The
 `test_the_replay_buffer_is_bounded_to_the_documented_size` reads its frames
 the same way.
 
+### Correction 5 — Task 1: `drain()` is narrowed to the session side
+
+**Finding.** The task review found that `drain()` had been kept as a method
+on `EventSubscription`, which gave the subscriber a back-reference to its
+session and the class a second read path with its own copy of the overrun
+rule. Blueprint §3 says a subscriber holds *"its id, the id of the last
+frame it has read, and an `asyncio.Event`"* — nothing else. A subscription
+built through the documented two-argument constructor also read nothing at
+all, silently.
+
+**Ruling.** `drain()` is a session-side read, not a subscriber-side one. The
+subscriber holds exactly what blueprint §3 says it holds.
+
+`EventSubscription` loses its `drain()` method, its `session` parameter and
+its back-pointer, and is the brief's class verbatim. The session keeps the
+read:
+
+```python
+    def drain(self, subscription: EventSubscription) -> list[WorkflowEvent]:
+        """The frames published since the subscriber last read, without waiting.
+
+        The frames are the ones the session's history still holds, so a
+        subscriber that has fallen behind the history is told so rather
+        than handed a shortened sequence.
+        """
+        oldest = self._oldest_retained_id()
+        if oldest > subscription.position + 1:
+            raise SubscriberOverrun(
+                subscription.subscription_id, subscription.position, oldest
+            )
+        drained: list[WorkflowEvent] = []
+        while True:
+            frame = self._frame_after(subscription.position)
+            if frame is None:
+                return drained
+            subscription.position = frame[0]
+            drained.append(frame[1])
+```
+
+**Task 1 owns the call sites.** `backend/tests/test_stream_contract.py` has
+six `stream.drain()` call sites (L459, L474, L525, L539, L590, L711) and
+`backend/tests/test_sse_fanout.py` has two (`late.drain()`). All eight become
+`session.drain(stream)` and `session.drain(late)`; the session is already in
+scope at every one of them. No assertion changes. That file is therefore in
+Task 1's scope, and Task 3 starts from the adapted file.
+
+### Correction 6 — Task 1 and Task 2 are one indivisible change
+
+**Finding.** The task review found that Task 1 leaves `SubscriberOverrun`
+unhandled in the route: a subscriber that falls behind truncates its
+response with an unhandled exception, where blueprint §5 wants the stream to
+end with an `overflow` control frame. A cursor without an overflow policy is
+not shippable, and the two halves cannot be reviewed apart.
+
+**Ruling.** Task 2's work — the two counters, the route's `overflow` control
+frame and the test that proves it — is done in the same change as Task 1.
+Task 2 is not dispatched as a separate task; its brief is read and applied
+by the same implementer, in the same change.
+
 ---
 
 ### Task 2: The overflow
+
+> **Done as part of Task 1.** See *Correction 6 — Task 1 and Task 2 are one
+> indivisible change*, above. The steps below are applied by Task 1's
+> implementer; they are not dispatched as a separate task.
 
 **Files:**
 - Modify: `backend/src/lmeditor/server/session.py`
