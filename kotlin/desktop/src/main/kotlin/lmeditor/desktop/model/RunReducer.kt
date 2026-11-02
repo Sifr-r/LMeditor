@@ -29,17 +29,17 @@ import lmeditor.core.verificationScorecardFromWire
  * count the same frame twice -- a claim verified twice is one claim, and a
  * chunk published twice is one chunk.
  *
- * A frame of streamed text is the one frame that carries no id of its own, so
- * it is identified by what it does carry: the section it belongs to and its
- * own text. The test is a suffix test: a frame whose text the section
- * already ends with is taken for that frame arriving a second time, and is
- * not counted twice.
+ * A frame of streamed text is identified by what the reducer is given: the
+ * section it belongs to and its own text. The SSE frame carries an id, but
+ * the id is not in the event's data, so the reducer is not given it. The test
+ * is a suffix test: a frame whose text the section already ends with is taken
+ * for that frame arriving a second time, and is not counted twice.
  *
  * What that rule does not catch, and does not claim to: a replay of a whole
  * *sequence* of frames is not caught (only the frame that matches the
  * current tail is recognised), and a new frame whose text happens to be
  * identical to the section's current tail is treated as a replay. Catching
- * those needs an id on the frame, which the wire does not carry yet.
+ * those needs the frame's id, which the reducer is not given.
  *
  * Keeping the reduction apart from the controller is what makes that property
  * testable: the rule is stated once, and the test states it.
@@ -148,7 +148,7 @@ object RunReducer {
 /**
  * Whether this text already ends with [delta].
  *
- * A frame of streamed text carries no id of its own -- the wire gives a
+ * A frame of streamed text carries no id in its data -- the wire gives a
  * `token_delta` a `section_id` and a `delta` and nothing else -- so the only
  * thing the reducer can compare is the text the section already holds. The
  * question that matters is "was this frame the last thing appended?", and
@@ -169,8 +169,8 @@ object RunReducer {
  * *sequence* of frames (only the frame that matches the current tail is
  * recognised), and a new frame whose text happens to be identical to the
  * section's current tail (the rule cannot tell that frame from the one it
- * repeats). Catching those needs an id on the frame, which the wire does
- * not carry yet.
+ * repeats). Catching those needs the frame's id, which the reducer is not
+ * given.
  */
 private fun String.endsWithDelta(delta: String): Boolean =
     delta.isNotEmpty() && endsWith(delta)

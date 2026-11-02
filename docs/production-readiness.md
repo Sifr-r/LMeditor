@@ -79,7 +79,8 @@ This is a hosted pass of the candidate gate on two platforms. It is not a
 production readiness claim, and it did not touch the release findings: the
 API accepted unauthenticated callers at the time — the credential has since
 been added, and the section below describes it — the live SSE subscriber
-queues are still unbounded, the installed-wheel deployment is still
+queues are still unbounded — the subscriber memory has since been bounded, and
+the section below describes that too — the installed-wheel deployment is still
 unproven, and the desktop accessibility evidence is still missing. macOS
 and Python 3.12 have not been exercised by this matrix.
 
@@ -119,19 +120,55 @@ the loopback interface, or over a tunnel the operator controls. It does not
 identify *which* operator presented the token — there is one operator and
 one token.
 
+## The SSE stream's backpressure and resume — closed 2026-11-02
+
+The second item on the list below is closed. The live stream no longer keeps a
+per-subscriber queue, its frames carry an identity, a reconnecting client is
+served the frames it asked for and is told what it cannot have, and a dropped
+stream is released. The contract is `docs/sse-backpressure-blueprint.md`, and
+the ledger is ARCHITECTURE.md §33.
+
+- **The queue was removed, not capped.** A subscriber is a position in the
+  session's existing bounded history: `EventSubscription` holds an id, a
+  position and a wake-up, and no frames. A subscriber that stops reading
+  accumulates nothing, and the session notices when the frames it has not read
+  have left the history. A hundred stalled subscribers now cost what one
+  stalled subscriber costs.
+- **The overflow is a disconnect with a reason.** The stream ends with an
+  `overflow` control frame naming what was missed, the subscription is
+  released, and the client reconnects with the id of the last frame it
+  received. The reconnect is bounded to one attempt — a second overflow ends
+  the stream, and the desktop client says the run stopped short rather than
+  looping for ever.
+- **The frames carry an identity.** Every sequence frame carries `id: <n>`,
+  contiguous from 1 and strictly increasing. The two control frames carry
+  none, because a control frame with an id would advance every client's
+  last-event-id and silently break the resume. A client reconnects with
+  `Last-Event-ID`, and a header that is not ASCII decimal digits from 1 is
+  refused with a 400 rather than repaired.
+- **A resume the server cannot serve completely says so.** The server serves
+  what it remembers and names what it does not, in a `gap` control frame. The
+  rule is the same in both directions: a request the session has rotated past
+  and a request the session has not reached yet are both named.
+
+What it does not do: the stream is not lossless for a client that was away
+longer than the session's memory. That client is told what it missed and is
+meant to re-fetch the document's state, and **that re-fetch is not
+implemented**. The `token_delta` whole-sequence replay is still not caught
+either: the backend now publishes the frame identity, but the reducer is not
+given it, so the suffix test stands. macOS and Python 3.12 remain
+unexercised.
+
 ## Remaining release work, in order
 
-1. Bound live SSE subscriber memory and specify an overflow/disconnect policy.
-   Add frame identity, reconnect/replay proof and cancellation before claiming
-   streaming resilience.
-2. Exercise the installed Python wheel with its separately supplied tier jar and
+1. Exercise the installed Python wheel with its separately supplied tier jar and
    JVM outside the source checkout. Confirm artifact contents, startup, error
    handling and persistence across restart. The source gate alone cannot prove
    deployment packaging.
-3. Obtain clean Windows/Linux CI results and verify supported desktop workflows,
+2. Obtain clean Windows/Linux CI results and verify supported desktop workflows,
    keyboard and screen-reader behavior, real Word interoperability, and explicit
    filesystem support. These remain unproven until exercised.
-4. Close the remaining security and durability items in ARCHITECTURE.md §29.6,
+3. Close the remaining security and durability items in ARCHITECTURE.md §29.6,
    including C1 control validation, vault defaults, dependency vulnerability
    review, persistence durability and concurrent writes. A lockfile establishes
    resolution consistency; it does not establish that dependencies are secure.
@@ -172,3 +209,10 @@ The credential slice was verified the same way, on the tree it landed on:
 live HTTP document round trip, with no executed failures or skips. The
 evidence is under `build/release/run-iuv5yp7p`; the full local suite
 outside the portable scope is **1,740 passed, 0 failed**.
+
+The SSE slice was verified the same way: **1,079 Kotlin tests**, **1,724
+selected backend tests**, strict typing over **135 source files** for both
+platforms, **26** parity comparisons and the live HTTP document round trip,
+with no executed failures or skips. The evidence is under
+`build/release/run-fwl5lc_d`; the full local suite outside the portable scope
+is **1,748 passed, 0 failed**.
