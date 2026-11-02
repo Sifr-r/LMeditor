@@ -1403,6 +1403,45 @@ because the client is told what it missed and fetches the document's
 state instead."
 ```
 
+### Corrections to Task 4
+
+Added after the task review of Task 3, which found that the desktop client
+decodes every `data:` line as a `WorkflowEvent` — so both the `overflow`
+frame (Task 2) and the new `gap` frame (Task 3) would raise
+`BackendError.Malformed`.
+
+**Correction 9 — the gap frame needs a test of its own.**
+
+**Finding.** The plan's Step 1 test exercises the overflow frame only. The
+client's `when` handles the gap frame too, and blueprint §10's client proof
+is *"the client reads the `event:` field and recognises the two control
+frames rather than failing on them"*. A regression that made the client fail
+on a gap frame would not be caught, and the gap frame is exactly the frame
+the server sends when it cannot serve a client completely.
+
+**Ruling.** A second test is added: a stream carrying a gap frame followed
+by a sequence frame. The client must not fail on the gap frame, must not
+reconnect because of it — blueprint §9: *"a gap, by contrast, is not
+something to retry blindly — the client is told what it missed and re-fetches
+the document's state instead"* — and must deliver the sequence frame that
+follows.
+
+**Correction 10 — the two control frames are told apart by their `event:`
+name, and that is the only thing that tells them apart.**
+
+**Finding.** The server writes the control frames with no `id:` and with a
+`data:` of their own shape (`{reason, behind, oldest_retained}` for the
+overflow, `{requested_after, oldest_retained}` for the gap). Neither is a
+`WorkflowEvent`, and neither carries the field the client's frame type
+expects.
+
+**Ruling.** The client's frame type carries the `event:` name, the `id:` and
+the `data:` text, and the control frames are recognised by their name —
+which is what the plan's Step 3 already does. The implementation must not
+assume that every frame carries an `id:` or that every `data:` is an event
+envelope: a frame with no `id:` is a control frame, and a `data:` that does
+not decode as an event envelope is one too.
+
 ---
 
 ### Task 5: The ledger and the readiness list
