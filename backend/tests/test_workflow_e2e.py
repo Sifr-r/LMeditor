@@ -24,13 +24,13 @@ from typing import Any
 
 import dspy
 import pytest
-from fastapi.testclient import TestClient
 
 from lmeditor.core.schemas import OutlineNode, SectionDraft, Source, SourceChunk
 from lmeditor.core.types import EntailmentStatus, EventType, SourceKind
 from lmeditor.server.app import create_app
 from lmeditor.server.sources import StoredSource
 from lmeditor.workflow.nodes import NO_LM_CRITIQUE, draft_sections_node
+from tests.http_support import sync_client
 
 from .stub_lm import StubLM
 
@@ -463,7 +463,7 @@ def test_the_published_outline_is_a_tree_the_client_can_parse(
 
 
 def test_health_reports_whether_a_model_is_loaded() -> None:
-    with TestClient(create_app()) as client:
+    with sync_client(create_app()) as client:
         response = client.get("/api/v1/health")
     assert response.status_code == 200
     payload = response.json()
@@ -502,7 +502,7 @@ def test_document_can_be_fetched_and_exported_to_word(
     try:
         asyncio.run(_seed())
 
-        with TestClient(create_app()) as client:
+        with sync_client(create_app()) as client:
             document = client.get(f"/api/v1/documents/{doc_id}")
             assert document.status_code == 200
             payload = document.json()
@@ -531,7 +531,7 @@ def test_an_ingested_source_is_remembered_by_the_server() -> None:
 
     source_library.clear()
     try:
-        with TestClient(create_app()) as client:
+        with sync_client(create_app()) as client:
             response = client.post(
                 "/api/v1/sources/ingest",
                 data={"source_id": "src_lib_1", "title": "Municipal Audit"},
@@ -562,7 +562,7 @@ def test_a_legacy_doc_upload_is_refused_with_a_useful_message() -> None:
     # with.
     legacy = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + b"\x00" * 64
 
-    with TestClient(create_app()) as client:
+    with sync_client(create_app()) as client:
         response = client.post(
             "/api/v1/sources/ingest",
             data={"source_id": "src_legacy", "title": "old.doc"},
@@ -679,7 +679,7 @@ def test_a_citation_marker_follows_the_sentence_it_supports() -> None:
 
 def test_a_generation_request_needs_material() -> None:
     """A request naming no source material is rejected, not silently run."""
-    with TestClient(create_app()) as client:
+    with sync_client(create_app()) as client:
         response = client.post("/api/v1/documents/generate", json={"topic": TOPIC})
     assert response.status_code == 422
 
@@ -709,7 +709,7 @@ def test_a_generation_request_can_reference_a_source_by_id(
             )
         )
 
-        with TestClient(create_app()) as client:
+        with sync_client(create_app()) as client:
             response = client.post(
                 "/api/v1/documents/generate",
                 json={"topic": TOPIC, "source_ids": ["src_ref_1"]},

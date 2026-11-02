@@ -25,7 +25,6 @@ from typing import Any
 
 import dspy
 import pytest
-from fastapi.testclient import TestClient
 
 from lmeditor.core.schemas import SourceChunk
 from lmeditor.core.types import EntailmentStatus
@@ -33,6 +32,7 @@ from lmeditor.server.app import create_app
 from lmeditor.server.session import session_manager
 from lmeditor.workflow.graph import run_workflow
 from lmeditor.workflow.nodes import provenance_index_for, release_provenance_index
+from tests.http_support import sync_client
 
 from .stub_lm import StubLM
 
@@ -161,7 +161,7 @@ def test_a_verbatim_source_passage_fact_checks_as_supported(
     doc_id = "doc_completed_factcheck"
     _run_a_document_to_completion(doc_id)
 
-    with TestClient(create_app()) as client:
+    with sync_client(create_app()) as client:
         response = client.post(
             f"/api/v1/documents/{doc_id}/factcheck",
             json={
@@ -207,7 +207,7 @@ def test_the_index_is_what_makes_the_verdict_supported(
     _run_a_document_to_completion(doc_id)
 
     def _check() -> dict[str, Any]:
-        with TestClient(create_app()) as client:
+        with sync_client(create_app()) as client:
             response = client.post(
                 f"/api/v1/documents/{doc_id}/factcheck",
                 json={
@@ -249,7 +249,7 @@ def test_a_grounded_edit_applies_to_a_completed_document(
     doc_id = "doc_completed_edit"
     _run_a_document_to_completion(doc_id)
 
-    with TestClient(create_app()) as client:
+    with sync_client(create_app()) as client:
         document = client.get(f"/api/v1/documents/{doc_id}")
         assert document.status_code == 200, document.text
         sections = document.json()["sections"]

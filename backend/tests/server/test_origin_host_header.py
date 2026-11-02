@@ -36,6 +36,7 @@ import pytest
 
 from lmeditor.server.app import create_app
 from lmeditor.server.vault import active_vault_root, close_active_vault
+from tests.http_support import auth_headers
 
 #: The address the connection was accepted on when the API is served on
 #: the loopback interface. It is not port 8000 on purpose: the port the
@@ -64,6 +65,14 @@ FOREIGN_ORIGIN = "https://evil.example"
 #: header does.
 MALFORMED_HOSTS: tuple[str, ...] = ("not a host", "127.0.0.1:60804/api")
 
+#: The suite's credential, in the spelling an ASGI scope carries headers
+#: in. The header name keeps the capitalisation a client would send, so
+#: that the scope is spelled the way a real request is.
+_CREDENTIAL_HEADERS: list[tuple[bytes, bytes]] = [
+    (key.encode("latin-1"), value.encode("latin-1"))
+    for key, value in auth_headers().items()
+]
+
 
 def _call(
     method: str,
@@ -83,6 +92,11 @@ def _call(
     the address the connection was accepted on, which is what the
     own-origin rule falls back to when there is no ``Host`` header to
     read.
+
+    Every route under ``/api/`` refuses a request that carries no
+    credential, so the scope carries the suite's own. The request here
+    is about the ``Host`` header and not about the credential, and one
+    answered with a refusal would say nothing about the origin rule.
     """
     app = create_app()
     scope: dict[str, Any] = {
@@ -90,7 +104,7 @@ def _call(
         "asgi": {"version": "3.0"},
         "http_version": "1.1",
         "method": method,
-        "headers": headers,
+        "headers": [*_CREDENTIAL_HEADERS, *headers],
         "scheme": "http",
         "path": path,
         "raw_path": path.encode("ascii"),

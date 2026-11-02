@@ -260,6 +260,13 @@ def release_environment(run_dir: Path, *, portable: bool = False) -> dict[str, s
         target = run_dir / directory
         target.mkdir()
         environment[name] = str(target)
+    # The API's token file is the one piece of operator state the server
+    # writes by itself, and it belongs to the operator's home directory by
+    # default. A run that resolved a credential without naming the file
+    # would leave a token in the operator's home, so the file is named here
+    # like every other piece of verification data. It is a file and not a
+    # directory, so it is named rather than made.
+    environment["LMEDITOR_API_TOKEN_FILE"] = str(run_dir / "api-token")
     return environment
 
 

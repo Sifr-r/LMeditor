@@ -12,7 +12,6 @@ contradicts the path, the path wins.
 from __future__ import annotations
 
 import pytest
-from fastapi.testclient import TestClient
 
 from lmeditor.core.schemas import (
     BookSectionEditRequest,
@@ -21,6 +20,7 @@ from lmeditor.core.schemas import (
     InlineEditRequest,
 )
 from lmeditor.server.app import create_app
+from tests.http_support import sync_client
 
 
 def test_a_review_decision_does_not_have_to_name_the_document() -> None:
@@ -60,7 +60,7 @@ def test_the_path_wins_over_a_body_that_names_another_document() -> None:
     the body is inert: the edit lands on the document the URL names, and the
     refusal for a document that does not exist names *that* document.
     """
-    with TestClient(create_app()) as client:
+    with sync_client(create_app()) as client:
         response = client.post(
             "/api/v1/documents/doc_from_the_path/edits",
             json={
@@ -81,7 +81,7 @@ def test_the_path_wins_over_a_body_that_names_another_document() -> None:
 
 def test_the_fact_check_route_reads_the_document_from_the_path() -> None:
     """A body that names another document cannot redirect the check."""
-    with TestClient(create_app()) as client:
+    with sync_client(create_app()) as client:
         response = client.post(
             "/api/v1/documents/doc_from_the_path/factcheck",
             json={
@@ -97,7 +97,7 @@ def test_the_fact_check_route_reads_the_document_from_the_path() -> None:
 
 def test_a_request_without_the_body_id_is_accepted() -> None:
     """A body that omits the id entirely is not a validation error."""
-    with TestClient(create_app()) as client:
+    with sync_client(create_app()) as client:
         response = client.post(
             "/api/v1/documents/doc_that_does_not_exist/factcheck",
             json={"text": "A passage.", "include_web": False},
@@ -116,7 +116,7 @@ def test_a_request_without_the_body_id_is_accepted() -> None:
 )
 def test_a_request_without_the_body_ids_is_accepted(path: str) -> None:
     """Neither the edit nor the book edit demands the id in the body."""
-    with TestClient(create_app()) as client:
+    with sync_client(create_app()) as client:
         response = client.post(
             path,
             json={
@@ -132,7 +132,7 @@ def test_a_request_without_the_body_ids_is_accepted(path: str) -> None:
 
 def test_the_path_wins_over_a_body_that_names_another_book() -> None:
     """A body that contradicts the path cannot redirect a book edit."""
-    with TestClient(create_app()) as client:
+    with sync_client(create_app()) as client:
         response = client.post(
             "/api/v1/library/books/book_from_the_path/sections/sec_1/edits",
             json={
