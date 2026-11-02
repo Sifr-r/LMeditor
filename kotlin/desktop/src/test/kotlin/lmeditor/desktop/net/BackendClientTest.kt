@@ -64,6 +64,45 @@ class BackendClientTest {
         assertEquals("maintenance", failure.detail)
     }
 
+    @Test
+    fun `every request carries the credential the API requires`() = runBlocking<Unit> {
+        val requests = mutableListOf<HttpRequest>()
+        val http = StubHttpClient { request ->
+            requests.add(request)
+            CompletableFuture.completedFuture(StubResponse(request, 200, healthJson.toByteArray()))
+        }
+        val client = BackendClient("http://example.test", http, ApiCredential.Read("test-token"))
+        client.health()
+        client.exportDocx("doc_1")
+        client.exportBookDocx("book_1")
+        assertEquals(3, requests.size)
+        requests.forEach { request ->
+            assertEquals("Bearer test-token", request.headers().firstValue("Authorization").orElse(""))
+        }
+    }
+
+    @Test
+    fun `a credential that could not be read refuses the request instead of leaving the header off`() = runBlocking<Unit> {
+        val requests = mutableListOf<HttpRequest>()
+        val http = StubHttpClient { request ->
+            requests.add(request)
+            CompletableFuture.completedFuture(StubResponse(request, 200, healthJson.toByteArray()))
+        }
+        val client = BackendClient(
+            "http://example.test",
+            http,
+            ApiCredential.Unreadable(BackendError.Uncredentialed("C:/token")),
+        )
+        val failure = assertFailsWith<BackendError.Uncredentialed> { client.health() }
+        assertEquals("C:/token", failure.source)
+        assertTrue(requests.isEmpty())
+    }
+
+    /** The answer the health route gives, as the server sends it. */
+    private val healthJson = """
+        {"status":"ok","version":"0.1.0","lm":{"configured":false,"is_stub":true}}
+    """.trimIndent()
+
     // The explicit `Unit` matters: `assertFailsWith` answers the exception it
     // caught, so a body ending in one would make the test method answer
     // `ValidationError` instead of `Unit` -- and JUnit 5 quietly skips a test

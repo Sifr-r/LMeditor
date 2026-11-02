@@ -17,6 +17,7 @@ from lmeditor.server.roots import refusal_reason
 from lmeditor.server.sources import StoredSource, source_library
 from lmeditor.tier import bridge as shared_bridge
 from lmeditor.tier.server import source_archive_root
+from tests.http_support import async_client
 
 
 @pytest.fixture(autouse=True)
@@ -167,9 +168,7 @@ def test_notebook_ask_restores_its_sources_after_bridge_restart(
 
     def call(method: str, path: str, body: dict[str, Any]) -> httpx.Response:
         async def request() -> httpx.Response:
-            async with httpx.AsyncClient(
-                transport=httpx.ASGITransport(app=app), base_url="http://test"
-            ) as client:
+            async with async_client(app) as client:
                 return await client.request(method, path, json=body)
 
         return asyncio.run(request())
@@ -240,9 +239,7 @@ def test_the_named_base_decides_where_the_notebooks_may_be_not_the_host(
 
     def call(method: str, path: str, body: dict[str, Any]) -> httpx.Response:
         async def request() -> httpx.Response:
-            async with httpx.AsyncClient(
-                transport=httpx.ASGITransport(app=app), base_url="http://test"
-            ) as client:
+            async with async_client(app) as client:
                 return await client.request(method, path, json=body)
 
         return asyncio.run(request())

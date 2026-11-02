@@ -54,6 +54,7 @@ from lmeditor.server.routes import (
 )
 from lmeditor.server.sources import StoredSource, source_library
 from lmeditor.server.vault import active_vault_root, close_active_vault
+from tests.http_support import async_client
 
 #: An origin that is not the API's own.
 FOREIGN_ORIGIN = "https://evil.example"
@@ -119,10 +120,9 @@ def _call(
     is a test that says which port the API was served on.
     """
     app = create_app()
-    transport = httpx.ASGITransport(app=app)
 
     async def run() -> httpx.Response:
-        async with httpx.AsyncClient(transport=transport, base_url=base_url) as client:
+        async with async_client(app, base_url=base_url) as client:
             return await client.request(method, path, **kwargs)
 
     return asyncio.run(run())
@@ -140,10 +140,8 @@ def _call_with_failure(message: str, error: type[Exception]) -> httpx.Response:
     async def _failure() -> dict[str, Any]:
         raise error(message)  # type: ignore[call-arg]
 
-    transport = httpx.ASGITransport(app=app)
-
     async def run() -> httpx.Response:
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with async_client(app) as client:
             return await client.get("/_test/failure")
 
     return asyncio.run(run())
@@ -161,10 +159,8 @@ def _call_with_details(error: type[Exception], details: dict[str, Any]) -> httpx
     async def _failure() -> dict[str, Any]:
         raise error("the chunker could not read the document", details=details)  # type: ignore[call-arg]
 
-    transport = httpx.ASGITransport(app=app)
-
     async def run() -> httpx.Response:
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with async_client(app) as client:
             return await client.get("/_test/failure")
 
     return asyncio.run(run())

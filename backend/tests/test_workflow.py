@@ -32,6 +32,7 @@ from lmeditor.workflow.state import (
     create_initial_harness_state,
     merge_dicts,
 )
+from tests.http_support import async_client
 
 
 def test_harness_state_initialization_and_reducers() -> None:
@@ -202,13 +203,10 @@ def test_ingest_endpoint_accepts_text_file() -> None:
     import tempfile
     from pathlib import Path
 
-    import httpx
-
     from lmeditor.server.app import create_app
     from lmeditor.server.sources import source_library
 
     app = create_app()
-    transport = httpx.ASGITransport(app=app)
 
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".txt", delete=False, encoding="utf-8"
@@ -220,7 +218,7 @@ def test_ingest_endpoint_accepts_text_file() -> None:
     data = {"source_id": "src_api", "title": "note.txt"}
 
     async def run() -> None:
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with async_client(app) as client:
             response = await client.post(
                 "/api/v1/sources/ingest",
                 files=files,

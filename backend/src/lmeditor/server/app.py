@@ -9,6 +9,7 @@ from urllib.parse import urlsplit
 from fastapi import FastAPI, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from lmeditor.core.exceptions import (
     BookNotFoundError,
@@ -26,6 +27,12 @@ from lmeditor.core.exceptions import (
     VerificationError,
     WebEvidenceError,
     WorkflowError,
+)
+from lmeditor.server.credential import (
+    credential_for,
+    header,
+    is_preflight,
+    require_the_credential,
 )
 from lmeditor.server.routes import router
 from lmeditor.server.routes_helpers import safe_detail, safe_detail_value, safe_message
@@ -240,14 +247,6 @@ def _is_loopback_host(host: str) -> bool:
     return host in _LOOPBACK_HOSTS
 
 
-def _is_preflight(request: Request) -> bool:
-    """Whether this is a browser asking what it may do before it does it."""
-    return (
-        request.method == "OPTIONS"
-        and "access-control-request-method" in request.headers
-    )
-
-
 def _preflight_response(origin: str, request: Request) -> Response:
     """The answer to a browser's question about what it may do.
 
@@ -261,13 +260,13 @@ def _preflight_response(origin: str, request: Request) -> Response:
         "Access-Control-Allow-Methods": ", ".join(_CORS_METHODS),
         "Access-Control-Max-Age": str(_CORS_MAX_AGE),
     }
-    requested_headers = request.headers.get("access-control-request-headers")
+    requested_headers = header(request, "access-control-request-headers")
     if requested_headers:
         headers["Access-Control-Allow-Headers"] = requested_headers
     failures: list[str] = []
     if not _origin_allowed(origin, request):
         failures.append("origin")
-    requested_method = request.headers.get("access-control-request-method", "")
+    requested_method = header(request, "access-control-request-method") or ""
     if requested_method and requested_method not in _CORS_METHODS:
         failures.append("method")
     if failures:
@@ -384,6 +383,15 @@ def _safe_detail_key(key: Any) -> Any:
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan manager for graceful resource setup and teardown."""
+    # Startup: settle the credential before anything else.
+    #
+    # The token is settled here rather than at the first request so that a
+    # server which cannot keep its token says so by refusing to start,
+    # rather than by answering 401 to every caller for ever. The credential
+    # is settled before the language model is installed, because it is the
+    # one that can stop the server.
+    credential_for(app)
+
     # Startup: install the language model the harness drafts with.
     #
     # Every generative path in LMeditor needs one, and the app refuses to
@@ -454,7 +462,11 @@ def create_app() -> FastAPI:
         addressed to, and a page the API serves under the other spelling of
         the loopback address has to be answered with its own origin too.
         """
-        origin = request.headers.get("origin")
+        # The origin is read without regard to the case of its name. A
+        # header the server cannot find is a header it does not act on, and
+        # this one is a refusal: an origin read as absent is a foreign
+        # mutation let through.
+        origin = header(request, "origin")
         if origin is not None:
             if (
                 request.method in _MUTATING_METHODS
@@ -469,7 +481,7 @@ def create_app() -> FastAPI:
                         )
                     },
                 )
-            if _is_preflight(request) and origin not in allowed_origins():
+            if is_preflight(request) and origin not in allowed_origins():
                 # The allowlist cannot hold the API's own origin -- it is
                 # not a constant -- so the answer to the browser's own
                 # question is given here.
@@ -483,6 +495,20 @@ def create_app() -> FastAPI:
             response.headers["access-control-allow-origin"] = origin
             response.headers.add_vary_header("Origin")
         return response
+
+    # The credential is checked before anything else.
+    #
+    # This middleware is added last, and the last middleware added is the
+    # outermost one, so a request is authenticated before it is authorized:
+    # a caller that cannot prove it is the operator is not told whether the
+    # thing it asked for exists, and a mutating request from a foreign
+    # origin is refused by the credential before the origin rules get to
+    # decide anything about it.
+    #
+    # The origin rules below answer a different question -- what a *page* may
+    # do -- and they cannot answer what a *process* may do, because a
+    # process need only omit the ``Origin`` header. Both answers are needed.
+    app.add_middleware(BaseHTTPMiddleware, dispatch=require_the_credential)
 
     # Domain exception handlers
     @app.exception_handler(CitationHallucinationError)

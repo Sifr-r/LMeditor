@@ -35,6 +35,7 @@ import pytest
 from lmeditor.server.app import create_app
 from lmeditor.server.roots import refusal_reason
 from lmeditor.server.vault import active_vault_root, close_active_vault
+from tests.http_support import async_client
 
 #: Every vault route, with a request that names a note. The routes that
 #: need a vault answer 409 while none is open.
@@ -66,10 +67,9 @@ _VAULT_ROUTES: tuple[tuple[str, str, dict[str, Any]], ...] = (
 def _call(method: str, path: str, **kwargs: Any) -> httpx.Response:
     """Make one request against the application."""
     app = create_app()
-    transport = httpx.ASGITransport(app=app)
 
     async def run() -> httpx.Response:
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with async_client(app) as client:
             return await client.request(method, path, **kwargs)
 
     return asyncio.run(run())

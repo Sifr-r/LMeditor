@@ -47,6 +47,7 @@ from lmeditor.server.app import create_app
 from lmeditor.server.notebooks import close_notebooks_root
 from lmeditor.server.roots import refusal_reason
 from lmeditor.server.sources import StoredSource, source_library
+from tests.http_support import async_client
 
 #: A passage the notebook's own source holds.
 PASSAGE = "The median household income in Riverside was 54000 dollars in 2019."
@@ -58,10 +59,9 @@ OTHER_PASSAGE = "The median household income in Ashford was 61000 dollars in 201
 def _call(method: str, path: str, **kwargs: Any) -> httpx.Response:
     """Make one request against the application."""
     app = create_app()
-    transport = httpx.ASGITransport(app=app)
 
     async def run() -> httpx.Response:
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with async_client(app) as client:
             return await client.request(method, path, **kwargs)
 
     return asyncio.run(run())
@@ -131,6 +131,26 @@ def _notebooks_base(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     answer is the same on every platform.
     """
     monkeypatch.setenv("LMEDITOR_NOTEBOOKS_BASE", str(tmp_path))
+
+
+@pytest.fixture(autouse=True)
+def _credential_file_outside_the_notebooks(
+    suite_credential: None,
+    tmp_path_factory: pytest.TempPathFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep the API's token file out of the folder the notebooks live in.
+
+    The suite's own fixture points the token file at the test's temporary
+    folder, and this file's temporary folder is the notebooks' folder: a
+    test that says the folder holds nothing would then be saying it about
+    the credential's file rather than about the notebooks. The file goes
+    somewhere of its own; the token it holds is the suite's either way.
+    """
+    monkeypatch.setenv(
+        "LMEDITOR_API_TOKEN_FILE",
+        str(tmp_path_factory.mktemp("api-token") / "api-token"),
+    )
 
 
 @pytest.fixture(autouse=True)

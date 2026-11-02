@@ -54,6 +54,18 @@ class SseClientTest {
         assertTrue(input.closed)
     }
 
+    @Test
+    fun `the stream carries the credential the API requires`() = runBlocking<Unit> {
+        val http = StubHttpClient {
+            CompletableFuture.completedFuture(StubResponse(it, 200, ByteArrayInputStream(ByteArray(0))))
+        }
+        SseClient(http, "http://example.test", ApiCredential.Read("test-token")).events("doc_1").toList()
+        assertEquals(
+            "Bearer test-token",
+            http.lastRequest?.headers()?.firstValue("Authorization")?.orElse(""),
+        )
+    }
+
     private fun client(input: InputStream, status: Int = 200): SseClient = SseClient(
         StubHttpClient { CompletableFuture.completedFuture(StubResponse(it, status, input)) },
         "http://example.test",

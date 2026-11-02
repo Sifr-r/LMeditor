@@ -4676,9 +4676,10 @@ recorded here so the next engineer knows they exist:
   needs authorisation.
 - The `lmeditor.core` → `lmeditor.tier` import cycle survives, through
   function-local imports.
-- **Bearer-token authentication on the local API is unimplemented**, and it
-  needs the Kotlin desktop client to present a token.
-- `POST /workflow/{doc_id}/approve` is still unauthenticated.
+- **Bearer-token authentication on the local API** and the unauthenticated
+  `POST /workflow/{doc_id}/approve` were both open here. They are closed in
+  §32; every route under `/api/` now requires a bearer token and the
+  desktop client presents one.
 - The default vault base is the operator's home directory; a vault on another
   drive needs `LMEDITOR_VAULT_BASE`.
 - `fastapi` and `starlette` are unpinned in `backend/pyproject.toml`.
@@ -4732,6 +4733,9 @@ alone would not close that boundary.
 The first follow-up slice makes validation reproducible. Its blueprint is
 `docs/production-readiness-blueprint.md`; its operating instructions and ordered
 remaining release work are in `docs/production-readiness.md`.
+
+The authentication finding above is closed in §32. It is left here as the
+record it was: a dated review of the candidate as it stood on 2026-10-28.
 
 ### 30.1 Ownership and single responsibilities
 
@@ -5021,10 +5025,225 @@ is still open.
 ### 31.7 What this does not change
 
 The hosted runs are now a fact, but they are not a release verdict. The
-§29.6 and §30 findings are untouched by them: the API still accepts
-unauthenticated callers, workflow approval is still unauthenticated, the
-live SSE subscriber queues are still unbounded, the installed-wheel
+§29.6 and §30 findings are untouched by them: at the time of those runs the
+API still accepted unauthenticated callers, workflow approval was still
+unauthenticated, the live SSE subscriber queues are still unbounded, the
+installed-wheel deployment is still unproven, and the desktop accessibility
+evidence is still missing. The gate was made able to run on the platforms
+it declares; it was not made to certify a product that is not ready.
+
+§32 closes the first of those.
+
+---
+
+## 32. The API credential — 2026-11-02
+
+The first item of the §30 follow-up is closed. Every route under `/api/`
+requires a bearer token, and the desktop client presents one. The
+authoritative contract is `docs/api-authentication-blueprint.md`; it was
+written before either half of the implementation, so that the two could not
+drift from each other.
+
+### 32.1 What the finding was
+
+The origin rules refuse a *mutating* request from a page this API does not
+serve, and they are a good rule — the origin has to be the API's own,
+worked out per request and anchored on the loopback interface. But they
+are not authentication. A caller that is not a browser omits `Origin`, and
+the request is then answered as if it came from the operator. The desktop
+client does exactly that, because it is not a browser.
+
+So the boundary was only as strong as the assumption that nothing else on
+the machine speaks HTTP to the loopback interface — an assumption that
+stops holding the moment the API is bound to a LAN address, which is
+exactly the configuration the origin rules were written to allow.
+
+### 32.2 What was built
+
+**The server.** `backend/src/lmeditor/server/credential.py` is a new
+module with one responsibility: it resolves the token, keeps it in the
+token file, and checks what a request presents.
+
+| | |
+|---|---|
+| Where the token comes from | `LMEDITOR_API_TOKEN`, then the token file, then a newly generated one |
+| Where the token file is | `<home>/.lmeditor/api-token`, unless `LMEDITOR_API_TOKEN_FILE` names another |
+| What a refusal is | `401`, `WWW-Authenticate: Bearer realm="lmeditor"`, `{"detail": "This API requires a bearer token."}` |
+| What a refusal says | nothing else — it is identical for a missing credential and a wrong one |
+| How the token is compared | constant-time, over digests, so neither the comparison nor the length leaks |
+| Where the token is allowed to appear | the `Authorization` header, and nowhere else |
+
+The credential middleware is the **outermost** one, so a request is
+*authenticated before it is authorized*: a caller that cannot prove it is
+the operator is not told whether the thing it asked for exists, and a
+mutating request from a foreign origin is refused by the credential before
+the origin rules decide anything about it. Both answers are needed — the
+origin rules answer what a *page* may do and cannot answer what a
+*process* may do.
+
+The token is settled at startup, so that a server which cannot keep its
+token says so by refusing to start rather than by answering 401 for ever.
+A token that had to be generated and cannot be written to the token file
+**stops the server from starting**: a generated token that cannot be
+handed to the client is a server the client cannot talk to.
+
+**The desktop client.** `kotlin/desktop/.../net/ApiCredential.kt` is the
+client's half. It resolves the same token, in the same order, and sends it
+on every request — the three REST request sites and the SSE stream. A
+token that cannot be read is a typed `BackendError.Uncredentialed` naming
+the path it looked at, not a crash. The credential is not a data class,
+deliberately: a generated `toString` would print the token.
+
+### 32.3 Two decisions the two halves had to agree on
+
+The contract was written first, but two details were not in it, and the
+client and the server disagreed about them until they were settled. Both
+are now in the blueprint.
+
+- **The operator's token is trimmed.** The blueprint said "used verbatim";
+  the server trimmed it, because HTTP trims the whitespace around a header
+  value anyway and a token pasted out of a file would otherwise arrive
+  with a newline on the end of it. The client now trims it the same way.
+- **A named token file replaces the default one** rather than being tried
+  after it. The two halves have to name the same file, and a client that
+  fell back to the default would offer the server a token the server never
+  issued.
+
+The client also refuses a token holding a control character, because a
+control character would split the header the token travels in. The server
+does not refuse one — it only ever compares the token and never sends it —
+so the halves differ here, and they differ on the safe side.
+
+### 32.4 A defect the migration found
+
+`backend/tests/server/test_origin_host_header.py` builds its ASGI scope by
+hand, and the scope it builds spells the header `Authorization` with a
+capital A. Starlette 1.6 compares raw scope header names exactly as they
+arrive and does not lowercase them, so `request.headers.get("authorization")`
+did not find a header that was really there.
+
+HTTP header names are case-insensitive, so that was a defect in the
+server, not in the test — a caller that wrote `Authorization` would have
+been refused for having spelled it properly. The lookup now walks the
+scope's headers and matches the name without regard to case, and
+`test_a_header_name_is_case_insensitive` in
+`backend/tests/test_api_credential.py` pins it. The regression test was
+verified to fail without the fix and to pass with it.
+
+The same defect was found in the **origin** rules, where it fails the
+other way. `refuse_a_foreign_origin` read the `Origin` header the same
+case-sensitive way, so a scope that kept the client's capitalisation would
+have left the request looking like one from *no* origin — and the refusal
+would not have happened. A header the server cannot find is a header the
+server does not act on, and for this one the server does not act on it by
+refusing. `backend/tests/server/test_header_casing.py` pins both halves:
+a foreign origin spelled `Origin` is still refused, and the API's own
+origin spelled `Origin` is still allowed.
+
+This is a hardening of a control that already existed, not a change to
+it: on every server that complies with the ASGI specification — which
+lowercases the header names it puts in the scope — the behaviour is
+identical before and after. It matters for the servers that do not, and
+for the tests that write a scope by hand.
+
+### 32.4.1 The live server is a process, not a thread
+
+The test that proves the credential over a real socket runs the server as
+a **subprocess**, and the reason is worth recording because it is not
+obvious.
+
+The application's lifespan configures the language model on the way up and
+releases it on the way down, and DSPy binds its configuration to whichever
+thread configures it first: a second `dspy.configure` from another thread
+raises `RuntimeError`. A server run in a *thread* of the test process
+therefore takes that binding away from every test that runs after it — and
+the suite's own `stub_model` fixtures, which call `dspy.configure` from the
+main thread, all fail. The symptom is a scatter of setup and teardown
+errors across files that have nothing to do with each other.
+
+A subprocess has its own DSPy and its own binding, so the real-HTTP test
+cannot reach the rest of the suite. The scripts that drive a live server
+already spawned one for this reason; the test now does the same.
+
+### 32.5 What it proves, and what it does not
+
+`backend/tests/test_api_credential.py` is the proof. It walks the routes
+the application is actually made of — 43 of them, taken from the
+application rather than from a list written out by hand — and shows that
+every one of them is refused without the credential. It shows that a
+missing credential and a wrong one are refused *identically*, across
+eight different spellings of a wrong credential. It shows that the
+credential is served when it is right, over a real socket and not only
+in-process. It shows the token file is created, is reused across a
+restart, is replaced when the operator names a new token, is not rewritten
+when it already holds the token, and is private. It shows that a
+generated token that cannot be written stops the server, and that a named
+token that cannot be written is a warning and not a failure. It shows
+that the token appears in no log and in no response body.
+
+What it does **not** prove: the token travels on a plain HTTP connection,
+so anything on the path can read it. The API is still meant to be reached
+over the loopback interface, or over a tunnel the operator controls. It
+does not identify *which* operator presented the token — there is one
+operator and one token. And it does not establish production readiness:
+the live SSE subscriber queues are still unbounded, the installed-wheel
 deployment is still unproven, and the desktop accessibility evidence is
-still missing. The gate was made able to run on the platforms it
-declares; it was not made to certify a product that is not ready.
+still missing.
+
+### 32.6 The ledger
+
+`docs/replacement/requirements.json` requirement **R.08** ("Authenticated
+local gateway") moves from `in-progress` to `complete`. Its gate — refuse
+a mutation from a foreign origin, and refuse a call that carries no
+installation credential — is now satisfied on both halves, and its
+evidence names the lines that satisfy it.
+
+The §29.6 finding list is corrected: *Bearer-token authentication on the
+local API is unimplemented* and *`POST /workflow/{doc_id}/approve` is
+still unauthenticated* are no longer true, and have been removed from it.
+The rest of that list is untouched — the unbounded SSE queues, the
+declared-but-uncompared parity witnesses, the C1 control gap, the vault
+default, the unpinned dependencies and the rest all stand.
+
+### 32.7 The verification
+
+The local portable gate passes on this tree, and its evidence is kept under
+`build/release/run-*`.
+
+| | |
+|---|---|
+| Kotlin tests | **1,075** across 15 modules, 0 failures, 0 errors, 0 skipped (desktop 134) |
+| Strict Python typing | **135 source files**, clean for `--platform linux` and `--platform win32` |
+| Backend suite (full) | **1,740 passed**, 0 failed — the 1,719 of before plus the 21 this slice adds |
+| Backend suite (portable) | 1,716 passed, 5 deselected, 0 failed |
+| Kotlin parity | 26 agreed, 0 disagreed, 0 skipped |
+| Live HTTP round trip | every check passed |
+
+The 21 new backend tests are 19 in `backend/tests/test_api_credential.py`
+and 2 in `backend/tests/server/test_header_casing.py`. The 16 new Kotlin
+tests are 12 in `ApiCredentialTest` and 4 across the client, the stream
+and the controller.
+
+Three of the regression tests were verified to **fail without** their fix
+and to pass with it, because a test that cannot fail proves nothing:
+`test_a_header_name_is_case_insensitive`,
+`test_a_foreign_origin_is_refused_however_its_header_is_spelled`, and
+`test_a_preflight_is_recognised_whatever_its_header_is_spelled`.
+
+The gate now also names the API's token file among the directories it
+isolates, so a run that resolved a credential without naming the file
+cannot leave a token in the operator's home directory.
+
+The hosted CI agrees. On PR #4 the gate passed on both platforms:
+
+| Job | Run | Result |
+|---|---|---|
+| `Verify on ubuntu-latest` | 41393531249 | pass, 6m24s |
+| `Verify on windows-latest` | 41393531249 | pass, 7m16s |
+| `Verify on ubuntu-latest` | 41393561242 | pass, 5m47s |
+| `Verify on windows-latest` | 41393561242 | pass, 5m54s |
+
+Those runs are the first to exercise the credential end to end on Linux,
+where the desktop client is not part of the tier but the gateway, the
+release scripts and the live HTTP round trip are.
 

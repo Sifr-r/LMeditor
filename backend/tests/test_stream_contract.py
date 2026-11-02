@@ -29,13 +29,14 @@ from lmeditor.workflow.graph import (
     release_workflow,
     resume_workflow,
 )
+from tests.http_support import async_client
 
 #: Content that must never be echoed back by a refused local-file ingestion.
 SECRET = "INTERNAL-README-SECRET-9f2c1d"
 
 
 def _client(app: Any) -> httpx.AsyncClient:
-    return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test")
+    return async_client(app)
 
 
 #: Upper bound on a full SSE read. The stream endpoint is a generator that only

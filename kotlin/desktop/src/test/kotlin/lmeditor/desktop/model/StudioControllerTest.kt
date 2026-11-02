@@ -78,6 +78,27 @@ class StudioControllerTest {
     }
 
     @Test
+    fun `the rest client and the stream carry the same credential`() = runBlocking<Unit> {
+        val http = ControlledHttpClient()
+        val scope = CoroutineScope(Job() + Dispatchers.Unconfined)
+        try {
+            val controller = StudioController(scope, http)
+            controller.setTopic("A topic")
+            controller.startRun()
+            val run = http.next()
+            run.reply("""{"doc_id":"doc_1","status":"running"}""")
+            val stream = http.next()
+            controller.checkHealth()
+            val health = http.next()
+            health.reply("""{"status":"ok","version":"0.1.0","lm":{"configured":false,"is_stub":true}}""")
+            val rest = run.request.headers().firstValue("Authorization").orElse("")
+            val streamed = stream.request.headers().firstValue("Authorization").orElse("")
+            assertTrue(rest.isNotEmpty())
+            assertEquals(rest, streamed)
+        } finally { scope.cancel() }
+    }
+
+    @Test
     fun `stream failure is visible without failing the controller scope`() = runBlocking {
         val http = ControlledHttpClient()
         val job = Job()
