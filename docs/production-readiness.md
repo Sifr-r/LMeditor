@@ -76,29 +76,62 @@ exactly one skip, the Windows-only file-lock guarantee, which
 retained their effective declaration beside `external-checks.json`.
 
 This is a hosted pass of the candidate gate on two platforms. It is not a
-production readiness claim, and the release findings below are untouched by
-it: the API still accepts unauthenticated callers, the live SSE subscriber
+production readiness claim, and it did not touch the release findings: the
+API accepted unauthenticated callers at the time — the credential has since
+been added, and the section below describes it — the live SSE subscriber
 queues are still unbounded, the installed-wheel deployment is still
 unproven, and the desktop accessibility evidence is still missing. macOS
 and Python 3.12 have not been exercised by this matrix.
 
+## The API credential — closed 2026-11-02
+
+The first item on the list below is closed. Every route under `/api/` now
+requires a bearer token, the desktop client sends it, and the contract is
+`docs/api-authentication-blueprint.md`.
+
+- `backend/src/lmeditor/server/credential.py` resolves the token, keeps it
+  in the token file, and checks what a request presents. The comparison is
+  constant-time, and the token is never logged, never in a response body
+  and never in a URL.
+- The credential middleware is the outermost one, so a request is
+  **authenticated before it is authorized**: a caller that cannot prove it
+  is the operator is not told whether the thing it asked for exists. A
+  missing credential and a wrong one are refused identically — `401`,
+  `WWW-Authenticate: Bearer realm="lmeditor"`, and
+  `{"detail": "This API requires a bearer token."}` — so a caller learns
+  nothing from the difference. A header's *name* is matched without regard
+  to case, because HTTP says it is case-insensitive.
+- The token is settled at startup: the operator's own `LMEDITOR_API_TOKEN`,
+  then the token file, then a new one. Whatever it is, it is written to the
+  token file, at `<home>/.lmeditor/api-token` unless
+  `LMEDITOR_API_TOKEN_FILE` names another. A token that had to be
+  generated and cannot be written **stops the server from starting**: a
+  server that cannot hand its token to the client says so rather than
+  answering 401 for ever.
+- `kotlin/desktop/.../net/ApiCredential.kt` resolves the same token on the
+  client and sends it on every REST request and on the event stream. A
+  token that cannot be read is a typed `BackendError.Uncredentialed` naming
+  the path it looked at, not a crash.
+
+What it does not do: the token travels on a plain HTTP connection, so
+anything on the path can read it. The API is still meant to be reached over
+the loopback interface, or over a tunnel the operator controls. It does not
+identify *which* operator presented the token — there is one operator and
+one token.
+
 ## Remaining release work, in order
 
-1. Authenticate the local API end to end, including workflow approval, desktop
-   REST requests, exports and SSE connections. Origin filtering is useful but a
-   caller can omit `Origin`; it does not identify the operator. Verify missing,
-   invalid and valid credentials over actual HTTP, including streaming.
-2. Bound live SSE subscriber memory and specify an overflow/disconnect policy.
+1. Bound live SSE subscriber memory and specify an overflow/disconnect policy.
    Add frame identity, reconnect/replay proof and cancellation before claiming
    streaming resilience.
-3. Exercise the installed Python wheel with its separately supplied tier jar and
+2. Exercise the installed Python wheel with its separately supplied tier jar and
    JVM outside the source checkout. Confirm artifact contents, startup, error
    handling and persistence across restart. The source gate alone cannot prove
    deployment packaging.
-4. Obtain clean Windows/Linux CI results and verify supported desktop workflows,
+3. Obtain clean Windows/Linux CI results and verify supported desktop workflows,
    keyboard and screen-reader behavior, real Word interoperability, and explicit
    filesystem support. These remain unproven until exercised.
-5. Close the remaining security and durability items in ARCHITECTURE.md §29.6,
+4. Close the remaining security and durability items in ARCHITECTURE.md §29.6,
    including C1 control validation, vault defaults, dependency vulnerability
    review, persistence durability and concurrent writes. A lockfile establishes
    resolution consistency; it does not establish that dependencies are secure.
@@ -132,3 +165,10 @@ backend tests, strict typing over 134 source files, 26 parity comparisons, and
 the live HTTP document round trip. There were no executed failures or skips.
 The five model deselections and three excluded Word modules are recorded in
 `build/release/run-d8zgldlw/external-checks.json`; logs are beside it.
+
+The credential slice was verified the same way, on the tree it landed on:
+**1,075 Kotlin tests**, **1,716 selected backend tests**, strict typing over
+**135 source files** for both platforms, **26** parity comparisons and the
+live HTTP document round trip, with no executed failures or skips. The
+evidence is under `build/release/run-iuv5yp7p`; the full local suite
+outside the portable scope is **1,740 passed, 0 failed**.
