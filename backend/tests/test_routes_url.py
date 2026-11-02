@@ -26,6 +26,7 @@ import httpx
 from lmeditor.server import routes
 from lmeditor.server.app import create_app
 from lmeditor.server.routes import SourceIngestResponse
+from tests.http_support import async_client
 
 PUBLIC_ORIGIN = "https://93.184.216.34/paper"
 
@@ -59,10 +60,9 @@ def _stub_dispatch(monkeypatch: Any) -> dict[str, Any]:
 
 def _post(payload: dict[str, Any]) -> httpx.Response:
     app = create_app()
-    transport = httpx.ASGITransport(app=app)
 
     async def run() -> httpx.Response:
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with async_client(app) as client:
             return await client.post("/api/v1/sources/url", json=payload)
 
     return asyncio.run(run())

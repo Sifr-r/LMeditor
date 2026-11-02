@@ -49,6 +49,7 @@ import argparse
 import io
 import os
 import re
+import secrets
 import shutil
 import socket
 import subprocess
@@ -97,6 +98,38 @@ def _info(message: str) -> None:
     print(f"{DIM}      {message}{RESET}")
 
 
+def _auth_headers(token: str) -> dict[str, str]:
+    """The header that carries the API's credential.
+
+    Every route under ``/api/`` refuses a request that does not carry it, so
+    the credential travels with every request the script makes.
+    """
+    return {"Authorization": f"Bearer {token}"}
+
+
+def _the_operators_token() -> str:
+    """The token a server the script did not start is served with.
+
+    A server the operator started was given its token in the environment, or
+    it generated one and left it in the token file. The script looks in the
+    two places the API's own client looks, so that a run against the
+    operator's own server can talk to it.
+
+    Returns:
+        The token, or an empty string when there is none to be found.
+    """
+    named = os.environ.get("LMEDITOR_API_TOKEN", "").strip()
+    if named:
+        return named
+    path = os.environ.get("LMEDITOR_API_TOKEN_FILE", "").strip()
+    if not path:
+        path = str(Path.home() / ".lmeditor" / "api-token")
+    try:
+        return Path(path).read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
 def install_stub_model() -> None:
     """Install the deterministic model double into this process."""
     import dspy
@@ -107,12 +140,20 @@ def install_stub_model() -> None:
     _info("installed the deterministic stub model")
 
 
-def spawn_server(port: int, library_dir: Path) -> subprocess.Popen[bytes]:
+def spawn_server(
+    port: int, library_dir: Path, token: str, token_file: Path
+) -> subprocess.Popen[bytes]:
     """Start a backend configured with the deterministic stub model.
+
+    The server is served with the credential the script presents, and the
+    token file it keeps is the one inside the folder the script owns: a token
+    left in the operator's home directory would outlive the run.
 
     Args:
         port: The port the backend listens on.
         library_dir: The directory the imported books are written into.
+        token: The credential the backend is served with.
+        token_file: The file the backend keeps that credential in.
 
     Returns:
         The running backend process.
@@ -121,6 +162,8 @@ def spawn_server(port: int, library_dir: Path) -> subprocess.Popen[bytes]:
     env["LMEDITOR_LM_PROVIDER"] = "stub"
     env["LMEDITOR_LM_MODEL"] = "offline-stub"
     env["LMEDITOR_LIBRARY_DIR"] = str(library_dir)
+    env["LMEDITOR_API_TOKEN"] = token
+    env["LMEDITOR_API_TOKEN_FILE"] = str(token_file)
     env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "src")
     command = [
         sys.executable,
@@ -140,12 +183,21 @@ def spawn_server(port: int, library_dir: Path) -> subprocess.Popen[bytes]:
     )
 
 
-def wait_for_health(base_url: str, timeout: float = 60.0) -> bool:
-    """Wait until the backend answers its health check."""
+def wait_for_health(base_url: str, token: str, timeout: float = 60.0) -> bool:
+    """Wait until the backend answers its health check.
+
+    The health check is under ``/api/`` and is credentialed like every other
+    route, so the probe presents the credential: a probe without one is
+    answered with a refusal, and the server would never look healthy.
+    """
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
-            response = httpx.get(f"{base_url}/api/v1/health", timeout=5.0)
+            response = httpx.get(
+                f"{base_url}/api/v1/health",
+                timeout=5.0,
+                headers=_auth_headers(token),
+            )
             if response.status_code == 200:
                 return True
         except httpx.HTTPError:
@@ -293,9 +345,14 @@ def main() -> int:
     base_url = args.base_url.rstrip("/")
     server: subprocess.Popen[bytes] | None = None
     library_dir: Path | None = None
+    # The credential the script presents. A server the script starts is
+    # served with the token below; a server the operator started was given a
+    # token of its own, and that one is read instead.
+    token = ""
 
     if args.no_spawn:
         print(f"No-spawn mode: using the backend already running at {base_url}.")
+        token = _the_operators_token()
     else:
         print("Stub mode: verifying the round trip without a model provider.")
         install_stub_model()
@@ -305,8 +362,9 @@ def main() -> int:
             base_url = f"http://127.0.0.1:{port}"
             print(f"The requested port is in use; using {port} instead.")
         library_dir = Path(tempfile.mkdtemp(prefix="lmeditor_roundtrip_books_"))
-        server = spawn_server(port, library_dir)
-        if not wait_for_health(base_url, timeout=args.timeout):
+        token = secrets.token_urlsafe(32)
+        server = spawn_server(port, library_dir, token, library_dir / "api-token")
+        if not wait_for_health(base_url, token, timeout=args.timeout):
             _fail("the backend did not become healthy in time")
             if server is not None:
                 server.terminate()
@@ -315,7 +373,7 @@ def main() -> int:
             return 1
 
     try:
-        return _run_checks(args, base_url)
+        return _run_checks(args, base_url, token)
     finally:
         if server is not None:
             server.terminate()
@@ -327,9 +385,9 @@ def main() -> int:
             shutil.rmtree(library_dir, ignore_errors=True)
 
 
-def _run_checks(args: argparse.Namespace, base_url: str) -> int:
+def _run_checks(args: argparse.Namespace, base_url: str, token: str) -> int:
     failures = 0
-    client = httpx.Client(timeout=120.0)
+    client = httpx.Client(timeout=120.0, headers=_auth_headers(token))
     fixture = args.fixture.resolve()
 
     print("\n1. Health")

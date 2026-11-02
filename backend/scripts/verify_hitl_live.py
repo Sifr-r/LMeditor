@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import secrets
 import shutil
 import socket
 import subprocess
@@ -74,6 +75,15 @@ def _info(message: str) -> None:
     print(f"{DIM}      {message}{RESET}")
 
 
+def auth_headers(token: str) -> dict[str, str]:
+    """The header that carries the API's credential.
+
+    Every route under ``/api/`` refuses a request that does not carry it, so
+    the credential travels with every request the script makes.
+    """
+    return {"Authorization": f"Bearer {token}"}
+
+
 def free_port() -> int:
     """Return a port that is free right now."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
@@ -81,12 +91,21 @@ def free_port() -> int:
         return int(sock.getsockname()[1])
 
 
-def wait_for_health(base_url: str, timeout: float = 90.0) -> bool:
-    """Wait for the backend to answer its health endpoint."""
+def wait_for_health(base_url: str, token: str, timeout: float = 90.0) -> bool:
+    """Wait for the backend to answer its health endpoint.
+
+    The health check is under ``/api/`` and is credentialed like every other
+    route, so the probe presents the credential: a probe without one is
+    answered with a refusal, and the server would never look healthy.
+    """
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
-            response = httpx.get(f"{base_url}/api/v1/health", timeout=5.0)
+            response = httpx.get(
+                f"{base_url}/api/v1/health",
+                timeout=5.0,
+                headers=auth_headers(token),
+            )
             if response.status_code == 200:
                 return True
         except httpx.HTTPError:
@@ -95,15 +114,21 @@ def wait_for_health(base_url: str, timeout: float = 90.0) -> bool:
     return False
 
 
-def spawn_server(port: int) -> subprocess.Popen[bytes]:
+def spawn_server(port: int, token: str, token_file: Path) -> subprocess.Popen[bytes]:
     """Start a backend with **no** language model configured.
 
     Without a model no section can be drafted, so the run must route to the
     human-in-the-loop gate. The provider variables are removed rather than
     set, so an inherited environment cannot accidentally supply one.
+
+    The server is served with the credential the script presents, and the
+    token file it keeps is the one inside the folder the script owns: a token
+    left in the operator's home directory would outlive the run.
     """
     env = dict(os.environ)
     env["PYTHONPATH"] = str(BACKEND_DIR / "src")
+    env["LMEDITOR_API_TOKEN"] = token
+    env["LMEDITOR_API_TOKEN_FILE"] = str(token_file)
     for name in ("LMEDITOR_LM_PROVIDER", "LMEDITOR_LM_MODEL", "LMEDITOR_LM_API_KEY"):
         env.pop(name, None)
 
@@ -126,9 +151,10 @@ def spawn_server(port: int) -> subprocess.Popen[bytes]:
 class StreamCollector:
     """Collects the SSE frames a run publishes."""
 
-    def __init__(self, base_url: str, doc_id: str) -> None:
+    def __init__(self, base_url: str, doc_id: str, token: str) -> None:
         self.base_url = base_url
         self.doc_id = doc_id
+        self.token = token
         self.events: list[dict[str, Any]] = []
         self._thread = threading.Thread(target=self._run, daemon=True)
 
@@ -138,7 +164,10 @@ class StreamCollector:
     def _run(self) -> None:
         try:
             with httpx.stream(
-                "GET", f"{self.base_url}/api/v1/stream/{self.doc_id}", timeout=300.0
+                "GET",
+                f"{self.base_url}/api/v1/stream/{self.doc_id}",
+                timeout=300.0,
+                headers=auth_headers(self.token),
             ) as response:
                 for line in response.iter_lines():
                     if not line.startswith("data:"):
@@ -197,18 +226,22 @@ def main() -> int:
     base_url = f"http://127.0.0.1:{port}"
     upload_dir = tempfile.mkdtemp(prefix="lmeditor_live_hitl_uploads_")
     os.environ["LMEDITOR_UPLOAD_DIR"] = upload_dir
+    # The credential the script presents, and the server it is served with.
+    # The token file lives in the folder the script owns, so the server
+    # writes nothing into the operator's home directory.
+    token = secrets.token_urlsafe(32)
 
-    server = spawn_server(port)
+    server = spawn_server(port, token, Path(upload_dir) / "api-token")
     failures = 0
 
     try:
         print(f"backend: {base_url} (no language model, so the gate is reached)")
-        if not wait_for_health(base_url):
+        if not wait_for_health(base_url, token):
             _fail("the backend did not become healthy")
             return 1
         _ok("the backend is healthy")
 
-        client = httpx.Client(timeout=120.0)
+        client = httpx.Client(timeout=120.0, headers=auth_headers(token))
 
         print("\n1. The backend reports that it cannot write")
         health = client.get(f"{base_url}/api/v1/health").json()
@@ -244,7 +277,7 @@ def main() -> int:
         doc_id = generate.json()["doc_id"]
         _ok(f"document {doc_id} started")
 
-        collector = StreamCollector(base_url, doc_id)
+        collector = StreamCollector(base_url, doc_id, token)
         collector.start()
 
         print("\n4. The run reaches the gate")

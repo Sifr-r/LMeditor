@@ -28,10 +28,14 @@ import lmeditor.core.workflowEventFromWire
  *
  * The stream ends when the server closes it, which it does after the
  * terminal frame. That is not a failure: a finished run is a finished stream.
+ *
+ * The stream is a route under `/api/`, so it carries the credential the API
+ * requires, exactly as the REST requests do.
  */
 class SseClient(
     private val http: HttpClient,
     baseUrl: String,
+    private val credential: ApiCredential = ApiCredential.resolve(),
 ) {
     private val baseUrl = backendUrl(baseUrl)
 
@@ -46,6 +50,7 @@ class SseClient(
     fun events(docId: String): Flow<WorkflowEvent> = channelFlow {
         val request = HttpRequest.newBuilder()
             .uri(URI.create("$baseUrl/api/v1/stream/${pathSegment(docId)}"))
+            .header("Authorization", credential.authorization())
             .header("Accept", "text/event-stream")
             .header("Cache-Control", "no-cache")
             .GET()

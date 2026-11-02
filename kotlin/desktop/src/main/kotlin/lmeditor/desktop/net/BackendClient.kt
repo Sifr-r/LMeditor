@@ -65,10 +65,15 @@ import lmeditor.desktop.model.WorkflowStatus
  * Every response the backend sends is read with the tier's decoders wherever
  * the tier owns the model, so a payload the backend produced is read by the
  * same rules that wrote it.
+ *
+ * Every request carries the credential the API requires. The credential is
+ * resolved when the client is built, so a token that cannot be read is a
+ * failure the client names rather than a header it quietly leaves off.
  */
 class BackendClient(
     baseUrl: String,
     private val http: HttpClient = defaultHttpClient(),
+    private val credential: ApiCredential = ApiCredential.resolve(),
 ) {
 
     /** The backend's base URL, without a trailing slash. */
@@ -218,6 +223,7 @@ class BackendClient(
     suspend fun exportDocx(docId: String): ByteArray {
         val request = HttpRequest.newBuilder()
             .uri(URI.create("$baseUrl/api/v1/documents/${pathSegment(docId)}/export.docx"))
+            .header("Authorization", credential.authorization())
             .GET()
             .build()
         val response = http.sendCancellable(request, HttpResponse.BodyHandlers.ofByteArray())
@@ -309,6 +315,7 @@ class BackendClient(
     suspend fun exportBookDocx(bookId: String): ByteArray {
         val request = HttpRequest.newBuilder()
             .uri(URI.create("$baseUrl/api/v1/library/books/${pathSegment(bookId)}/export.docx"))
+            .header("Authorization", credential.authorization())
             .GET()
             .build()
         val response = http.sendCancellable(request, HttpResponse.BodyHandlers.ofByteArray())
@@ -670,6 +677,7 @@ class BackendClient(
         contentType: String?,
     ): Map<String, Any?> {
         val builder = HttpRequest.newBuilder().uri(URI.create("$baseUrl$path"))
+        builder.header("Authorization", credential.authorization())
         if (contentType != null) {
             builder.header("Content-Type", contentType)
         }

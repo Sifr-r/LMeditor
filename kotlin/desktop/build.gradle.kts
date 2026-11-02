@@ -41,6 +41,15 @@ dependencies {
     testImplementation(kotlin("test"))
 }
 
+// The client resolves its credential from the environment, and a test that
+// exercises the client therefore needs one. It is given the same way an
+// operator gives one -- through the environment -- so the tests walk the
+// resolution path the application walks. A test that is about the credential
+// itself passes its own token in by hand.
+tasks.withType<Test>().configureEach {
+    environment("LMEDITOR_API_TOKEN", "desktop-test-token")
+}
+
 compose.desktop {
     application {
         mainClass = "lmeditor.desktop.MainKt"

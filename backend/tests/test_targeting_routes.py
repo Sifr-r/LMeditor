@@ -16,12 +16,13 @@ import pytest
 
 from lmeditor.server.app import create_app
 from lmeditor.server.library import reset_book_store
+from tests.http_support import async_client
 
 
 def _client() -> httpx.AsyncClient:
     """An HTTP client bound to the application under test."""
-    transport = httpx.ASGITransport(app=create_app())
-    return httpx.AsyncClient(transport=transport, base_url="http://test")
+    app = create_app()
+    return async_client(app)
 
 
 def _run(coro: Any) -> Any:
