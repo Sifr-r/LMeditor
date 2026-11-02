@@ -5657,7 +5657,7 @@ The local portable gate passes on this tree, and its evidence is kept under
 | Kotlin parity | 26 agreed, 0 disagreed, 0 skipped |
 | Live HTTP round trip | every check passed |
 
-The evidence for this run is `build/release/run-jpm08wa3`. The five portable
+The evidence for this run is `build/release/run-918zj_yh`. The five portable
 deselections and the three excluded Word modules are recorded beside it in
 `external-checks.json`, and the full suite's own log is kept beside them as
 `pytest-full-suite.log`, because the gate itself runs only the portable scope.
