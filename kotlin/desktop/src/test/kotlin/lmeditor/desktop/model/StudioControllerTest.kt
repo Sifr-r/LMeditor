@@ -291,6 +291,122 @@ class StudioControllerTest {
         assertFalse(overflow.contains("reopened"), overflow)
     }
 
+    @Test
+    fun `permanent stream loss survives overflow errors and rejected starts until a new run begins`() = runBlocking {
+        val http = ControlledHttpClient()
+        val scope = CoroutineScope(Job() + Dispatchers.Unconfined)
+        try {
+            val controller = StudioController(scope, http)
+            controller.setTopic("A topic")
+            controller.startRun()
+            http.next().reply("""{"doc_id":"doc_1","status":"running"}""")
+            http.next().reply(
+                "event: gap\ndata: {\"requested_after\":1,\"oldest_retained\":3}\n\n" +
+                    "event: overflow\ndata: {\"behind\":3,\"oldest_retained\":2}\n\n",
+                stream = true,
+            )
+            val resumed = http.next()
+            val overflowed = withTimeout(5_000) {
+                controller.state.first { it.notice?.contains("held back 3") == true }
+            }
+            val loss = assertNotNull(overflowed.streamLossNotice)
+            assertTrue(loss.contains("missed frame 2"))
+            assertTrue(overflowed.notice.orEmpty().contains("held back 3"))
+            assertEquals(listOf(loss, overflowed.notice), overflowed.statusNotices)
+            controller.startRun()
+            assertTrue(controller.state.value.error.orEmpty().contains("already in flight"))
+            assertEquals(loss, controller.state.value.streamLossNotice)
+
+            // An ahead-of-session gap is transient and must not replace actual loss.
+            resumed.reply(
+                "event: gap\ndata: {\"requested_after\":999,\"oldest_retained\":1}\n\n" +
+                    "data: {\"event_type\":\"workflow_error\",\"step\":\"complete\"," +
+                    "\"doc_id\":\"doc_1\",\"data\":{\"error\":\"Generation failed\"}}\n\n",
+                stream = true,
+            )
+            val failed = withTimeout(5_000) {
+                controller.state.first { it.status == "failed" && !it.busy }
+            }
+            assertEquals("Generation failed", failed.error)
+            assertEquals(loss, failed.streamLossNotice)
+            assertTrue(failed.statusNotices.contains(loss))
+            assertTrue(failed.notice.orEmpty().contains("No events were missed"))
+
+            controller.notice("Copied to clipboard.")
+            assertEquals(listOf(loss, "Copied to clipboard."), controller.state.value.statusNotices)
+            controller.clearError()
+            assertEquals(loss, controller.state.value.streamLossNotice)
+
+            controller.setTopic("")
+            controller.startRun()
+            val refused = withTimeout(5_000) {
+                controller.state.first { it.error?.contains("needs a topic") == true && !it.busy }
+            }
+            assertEquals(loss, refused.streamLossNotice)
+
+            controller.setTopic("A new topic")
+            controller.startRun()
+            val refusedRequest = http.next()
+            assertEquals("starting", controller.state.value.status)
+            assertEquals(loss, controller.state.value.streamLossNotice)
+            refusedRequest.reply("""{"detail":"Generation unavailable"}""", status = 503)
+            val unavailable = withTimeout(5_000) {
+                controller.state.first { it.status == "failed" && it.error != null && !it.busy }
+            }
+            assertEquals(loss, unavailable.streamLossNotice)
+
+            controller.startRun()
+            http.next().reply("""{"doc_id":"doc_2","status":"running"}""")
+            http.next()
+            assertEquals("doc_2", controller.state.value.docId)
+            assertEquals(null, controller.state.value.streamLossNotice)
+            assertEquals(listOf("Run started."), controller.state.value.statusNotices)
+        } finally { scope.cancel() }
+    }
+
+    @Test
+    fun `an ahead-of-session gap does not pin a permanent loss warning`() = runBlocking {
+        val http = ControlledHttpClient()
+        val scope = CoroutineScope(Job() + Dispatchers.Unconfined)
+        try {
+            val controller = StudioController(scope, http)
+            controller.setTopic("A topic")
+            controller.startRun()
+            http.next().reply("""{"doc_id":"doc_1","status":"running"}""")
+            http.next().reply(
+                "event: gap\ndata: {\"requested_after\":2147483647,\"oldest_retained\":1}\n\n",
+                stream = true,
+            )
+            val ended = withTimeout(5_000) { controller.state.first { it.error != null && !it.busy } }
+            assertEquals(null, ended.streamLossNotice)
+            assertTrue(ended.notice.orEmpty().contains("No events were missed"))
+            controller.notice("Saved.")
+            assertEquals(listOf("Saved."), controller.state.value.statusNotices)
+        } finally { scope.cancel() }
+    }
+
+    @Test
+    fun `the first permanent gap remains visible after further gaps and malformed frames`() = runBlocking {
+        val http = ControlledHttpClient()
+        val scope = CoroutineScope(Job() + Dispatchers.Unconfined)
+        try {
+            val controller = StudioController(scope, http)
+            controller.setTopic("A topic")
+            controller.startRun()
+            http.next().reply("""{"doc_id":"doc_1","status":"running"}""")
+            http.next().reply(
+                "event: gap\ndata: {\"requested_after\":1,\"oldest_retained\":3}\n\n" +
+                    "event: gap\ndata: {\"requested_after\":3,\"oldest_retained\":6}\n\n" +
+                    "data: not-json\n\n",
+                stream = true,
+            )
+            val failed = withTimeout(5_000) { controller.state.first { it.error != null && !it.busy } }
+            assertTrue(failed.streamLossNotice.orEmpty().contains("missed frame 2"))
+            assertTrue(failed.notice.orEmpty().contains("missed frames 4 to 5"))
+            assertEquals(listOf(failed.streamLossNotice, failed.notice), failed.statusNotices)
+        } finally { scope.cancel() }
+    }
+
     /**
      * The notice one stream's body leaves in the state.
      *

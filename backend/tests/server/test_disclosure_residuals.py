@@ -42,7 +42,7 @@ from lmeditor.editing.rewrite import rewrite_with_lm
 from lmeditor.ingestion.url_policy import UnsafeSourceError
 from lmeditor.server import routes, routes_helpers
 from lmeditor.server.app import create_app
-from lmeditor.server.routes_helpers import safe_message
+from lmeditor.server.routes_helpers import safe_detail_value, safe_message
 from lmeditor.server.session import session_manager
 from tests.http_support import async_client
 
@@ -306,6 +306,60 @@ def test_a_posix_path_outside_the_known_roots_is_taken_out() -> None:
     assert "the tier could not read the manifest" in response.json()["message"]
     assert POSIX_SECRET_PATH not in response.text
     assert "/data/secrets" not in response.text
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["/data", "/workspace", "/custom-storage", "/\u7814\u7a76", "/workspace/", "/custom-storage/secrets"],
+)
+def test_single_posix_roots_are_masked_without_losing_the_reason(path: str) -> None:
+    message = f"cannot open '{path}': permission denied"
+    expected = "cannot open '<path>': permission denied"
+    assert safe_message(message) == expected
+    assert safe_detail_value(message) == expected
+    assert safe_message(expected) == expected
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://example.org/workspace",
+        "https://example.org:8443//workspace/file",
+        "https://[2001:db8::1]/workspace",
+        "https://[2001:db8::1]//workspace/file",
+        "HTTPS://example.org/workspace",
+    ],
+)
+def test_public_urls_survive_beside_a_redacted_posix_root(url: str) -> None:
+    message = f"cannot save {url} to '/workspace': permission denied"
+    expected = f"cannot save {url} to '<path>': permission denied"
+    assert safe_message(message) == expected
+    assert safe_detail_value(message) == expected
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["file:///workspace", "file:///custom-storage/secrets", "//custom-storage/secrets"],
+)
+def test_file_urls_and_double_slash_paths_remain_redacted(path: str) -> None:
+    result = safe_message(f"cannot open '{path}': permission denied")
+    assert "workspace" not in result
+    assert "custom-storage" not in result
+    assert "permission denied" in result
+
+
+def test_relative_words_and_useful_error_text_are_preserved() -> None:
+    message = "read/write failed: retry the import/export operation"
+    assert safe_message(message) == message
+    assert safe_detail_value(message) == message
+
+
+@pytest.mark.parametrize("separator", [")", "):"])
+def test_a_url_does_not_hide_a_path_after_its_closing_delimiter(separator: str) -> None:
+    message = f"see (https://example.org{separator}/workspace"
+    expected = f"see (https://example.org{separator}<path>"
+    assert safe_message(message) == expected
+    assert safe_detail_value(message) == expected
 
 
 def test_a_posix_path_outside_the_known_roots_keeps_the_path_in_the_log(

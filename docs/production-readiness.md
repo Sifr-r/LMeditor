@@ -165,6 +165,15 @@ is still not caught either: the backend now publishes the frame identity, but
 the reducer is not given it, so the suffix test stands. macOS and Python 3.12
 remain unexercised.
 
+### Consumer notice follow-up — implemented 2026-11-02, Kotlin verification complete
+
+The desktop retains the first confirmed permanent stream-loss warning separately
+from transient notices. Documents, Vault, Notebook and Studio render notices
+alongside errors. Rejected/failed starts retain that warning; an acknowledged
+new run clears it. The four focused regressions run and pass:
+`.\gradlew.bat :desktop:test` from `kotlin` executes 144 desktop tests with zero
+failures. Frame-identity deduplication and snapshot reconciliation remain open.
+
 ## Remaining release work, in order
 
 1. Exercise the installed Python wheel with its separately supplied tier jar and
@@ -185,10 +194,29 @@ monastic-library passage for a monasteries query. The semantic-quality assertion
 is retained in full mode. A release must provision and verify its models, or
 explicitly define the quality users can expect in the degraded mode.
 
-The documentation generator and four auxiliary documentation checkers still
-live in the ignored `.tools/` directory. The backend suite checks the tracked
-requirements registry, but reproducing every check in the old handoff requires
-promoting those tools into the maintained source tree in a subsequent slice.
+The matrix renderer and four auxiliary documentation checkers now live in
+maintained `backend/scripts/`, with standard-library-only invocation documented
+in ACTION_PLAN.md §6. The tooling/registry suite passes 33 focused tests and
+strict typing; live checks report zero link/fragment/evidence-address,
+inventory-cell, vocabulary and corpus-digest problems. The registry remains
+authoritative. The old hardcoded registry builder is not promoted or invoked;
+reproducible registry regeneration and semantic evidence-anchor checking remain
+open A7 work. No fresh release gate is claimed by these focused checks.
+
+The A3 follow-up also masks unfamiliar single POSIX roots in client-facing
+errors while preserving explicit HTTP(S) URLs. Seventeen adversarial cases and
+strict typing pass. The broader API disclosure suites run: the residual and
+error-disclosure suites pass and the full backend suite passes 1,785 tests with
+no failure, so the recorded Windows event-loop socketpair hang does not
+reproduce on this machine. The earlier C1 and custom-style patches now have
+executed Kotlin proof — `:ingest:test` and `:word:test` pass 316 tests with zero
+failures; vault defaults, dependency vulnerability review and durability work
+remain open. See ARCHITECTURE.md §34 and §35.
+
+The locally recorded results describe local `main` at `f0afc63` plus the
+uncommitted batch work. `origin/main` is four commits ahead and overlaps three
+of the changed files, so these figures are not a result for the merged tree and
+must be re-run after that divergence is reconciled.
 
 ## Evidence from this follow-up
 

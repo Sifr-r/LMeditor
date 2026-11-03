@@ -124,9 +124,16 @@ data class StudioState(
     /** The last thing worth telling the operator. */
     val notice: String? = null,
 
+    /** Confirmed permanent stream loss, retained until the server acknowledges a new run. */
+    val streamLossNotice: String? = null,
+
     /** True while a request is in flight. */
     val busy: Boolean = false,
 ) {
+    /** Notices remain visible together, including when the state also carries an error. */
+    val statusNotices: List<String>
+        get() = listOfNotNull(streamLossNotice, notice).distinct()
+
     companion object {
         /** The backend the client reaches when nothing else is configured. */
         const val FALLBACK_BACKEND_URL: String = "http://127.0.0.1:8000"
